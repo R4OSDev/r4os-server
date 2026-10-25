@@ -27,6 +27,7 @@ STATIC_ROUTES = {
     "/favicon.ico": ("favicon.ico", "image/x-icon"),
     "/apple-touch-icon.png": ("apple-touch-icon.png", "image/png"),
 }
+ICON_PATHS = frozenset(("/favicon.svg", "/favicon.ico", "/apple-touch-icon.png"))
 
 
 class WebAppServer(ThreadingHTTPServer):
@@ -80,13 +81,14 @@ class WebAppHandler(BaseHTTPRequestHandler):
                 send_body,
             )
             return
-        self.send_content(200, content_type, content, send_body)
+        cache_control = "private, max-age=86400" if path in ICON_PATHS else "no-store"
+        self.send_content(200, content_type, content, send_body, cache_control=cache_control)
 
-    def send_content(self, status, content_type, content, send_body):
+    def send_content(self, status, content_type, content, send_body, *, cache_control="no-store"):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(content)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache_control)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header(
