@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="description" content="Verwaltungsoberfläche für R4OS Server.">
+    <title>R4OS Server</title>
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" sizes="16x16 32x32 48x48">
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" sizes="any">
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" sizes="180x180">
+    <link rel="stylesheet" href="/app.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <svg class="icon-definitions" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+      <symbol id="icon-apps" viewBox="0 0 24 24">
+        <rect x="3.5" y="3.5" width="6" height="6" rx="1.25"/>
+        <rect x="14.5" y="3.5" width="6" height="6" rx="1.25"/>
+        <rect x="3.5" y="14.5" width="6" height="6" rx="1.25"/>
+        <rect x="14.5" y="14.5" width="6" height="6" rx="1.25"/>
+      </symbol>
+      <symbol id="icon-updates" viewBox="0 0 24 24">
+        <path d="M12 3.5v11m-4-4 4 4 4-4M4.5 15v4a1.5 1.5 0 0 0 1.5 1.5h12a1.5 1.5 0 0 0 1.5-1.5v-4"/>
+      </symbol>
+      <symbol id="icon-benchmarks" viewBox="0 0 24 24">
+        <path d="M4 20h16M6 15v-4m6 9V4m6 16v-9"/>
+      </symbol>
+      <symbol id="icon-settings" viewBox="0 0 24 24">
+        <path d="m10 3-.7 2.2-2 .9-2.2-.5-2 3.5L4.7 11v2l-1.6 1.9 2 3.5 2.2-.5 2 .9.7 2.2h4l.7-2.2 2-.9 2.2.5 2-3.5-1.6-1.9v-2l1.6-1.9-2-3.5-2.2.5-2-.9L14 3z"/>
+        <circle cx="12" cy="12" r="3"/>
+      </symbol>
+    </svg>
+
+    <div class="application">
+      <div class="workspace">
+        <aside class="navigation-column primary-column" aria-label="Hauptnavigation">
+          <a class="brand" href="#apps" aria-label="R4OS Server, Apps öffnen">
+            <span class="brand-mark" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><use href="#icon-apps"/></svg>
+            </span>
+            <span>R4OS <span class="brand-secondary">Server</span></span>
+          </a>
+
+          <nav class="navigation" aria-label="Bereiche">
+            <a class="navigation-item" href="#apps" data-view="apps" aria-current="page">
+              <svg class="navigation-icon" aria-hidden="true"><use href="#icon-apps"/></svg>
+              <span>Apps</span>
+            </a>
+            <a class="navigation-item" href="#updates" data-view="updates">
+              <svg class="navigation-icon" aria-hidden="true"><use href="#icon-updates"/></svg>
+              <span>Updates</span>
+            </a>
+            <a class="navigation-item" href="#benchmarks" data-view="benchmarks">
+              <svg class="navigation-icon" aria-hidden="true"><use href="#icon-benchmarks"/></svg>
+              <span>Benchmarks</span>
+            </a>
+            <a class="navigation-item" href="#settings" data-view="settings">
+              <svg class="navigation-icon" aria-hidden="true"><use href="#icon-settings"/></svg>
+              <span>Einstellungen</span>
+            </a>
+          </nav>
+        </aside>
+
+        <aside class="navigation-column submenu-column" aria-label="Untermenü, zweite Spalte"></aside>
+        <aside class="navigation-column submenu-column third-column" aria-label="Untermenü, dritte Spalte"></aside>
+        <main class="content-area" id="content-area" aria-label="Arbeitsbereich: Apps"></main>
+      </div>
+
+      <footer class="statusbar" aria-label="Statusleiste">
+        <div class="statusbar-indicators" id="connection" data-state="connecting">
+          <span class="connection-dot" aria-hidden="true"></span>
+          <span class="connection-label" id="connection-label">Verbinde …</span>
+        </div>
+        <div class="statusbar-message" id="status-message" role="status" aria-live="polite" aria-atomic="true">Verbindung wird hergestellt …</div>
+        <div class="statusbar-version" aria-label="Versionsnummer">
+          <span class="version-caption">Version</span>
+          <span id="version">—</span>
+        </div>
+      </footer>
+    </div>
+  </body>
+</html>

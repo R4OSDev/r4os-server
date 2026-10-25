@@ -1,0 +1,35 @@
+[Unit]
+Description=R4OS Server WebApp
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+User=r4os-webapp
+WorkingDirectory=/opt/r4os-server
+EnvironmentFile=/etc/r4os-server/webapp.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -I -B /opt/r4os-server/WebApp/server.py
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+CapabilityBoundingSet=
+IPAddressDeny=any
+IPAddressAllow=localhost
+IPAddressAllow=10.0.0.0/8
+IPAddressAllow=172.16.0.0/12
+IPAddressAllow=192.168.0.0/16
+
+[Install]
+WantedBy=multi-user.target

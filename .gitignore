@@ -1,2 +1,6 @@
 # Dieses Verzeichnis bleibt ausschließlich lokal.
 /Private/
+
+# Lokale Python-Bytecode-Dateien.
+__pycache__/
+*.py[cod]
