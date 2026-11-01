@@ -1,0 +1,287 @@
+{
+  "schema_version": 1,
+  "run_id": "33333333-3333-4333-8333-333333333333",
+  "host_id": "hetzner-qemu",
+  "started_at_utc": "2026-10-12T10:00:00Z",
+  "finished_at_utc": "2026-10-12T10:00:10Z",
+  "status": "completed",
+  "failure_reason": null,
+  "release_version": "example-release-1",
+  "kernel_version": "example-kernel-1",
+  "spectra_version": "example-spectra-1",
+  "suite_version": "example-standard-1",
+  "scoring_version": "example-geomean-1",
+  "baseline_run_id": "33333333-3333-4333-8333-333333333333",
+  "environment_id": "qemu-smp4-2g",
+  "comparison_key": "standard-smp4",
+  "instrumentation_mode": "standard",
+  "notes": "SYNTHETIC: Complete schema-1 example for hetzner-qemu; not real R4OS measurements. Import only into an isolated test instance.",
+  "environment": {
+    "execution": "qemu",
+    "cpu": {
+      "model": "Example CPU, not actual Hetzner hardware",
+      "architecture": "x86_64"
+    },
+    "vcpus": 4,
+    "ram_bytes": "2147483648",
+    "qemu": {
+      "version": "10.1.0",
+      "backend": "kvm"
+    },
+    "storage": {
+      "driver": "virtio",
+      "cache": "none"
+    },
+    "workloads": {
+      "operations_per_metric": "10000",
+      "stream_bytes": "134217728"
+    },
+    "cache_state": "warm",
+    "warmup_runs": 1,
+    "repetitions": 1,
+    "host": {
+      "operating_system": "Example Linux host"
+    }
+  },
+  "artifacts": [
+    {
+      "component_id": "kernel",
+      "commit": "test-commit",
+      "build_options": {
+        "mode": "ReleaseSmall"
+      },
+      "hashes": {
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    }
+  ],
+  "metrics": [
+    {
+      "area_id": "scheduler_sync",
+      "metric_id": "main",
+      "metric_version": "1",
+      "unit": "ns/op",
+      "direction": "lower_is_better",
+      "primary": true,
+      "weight": 1,
+      "status": "ok",
+      "failure_reason": null,
+      "sample_count": 1,
+      "median_value": 1000,
+      "min_value": 1000,
+      "max_value": 1000,
+      "mad_value": 0,
+      "checks": {
+        "functional": true
+      }
+    },
+    {
+      "area_id": "memory",
+      "metric_id": "main",
+      "metric_version": "1",
+      "unit": "ns/op",
+      "direction": "lower_is_better",
+      "primary": true,
+      "weight": 1,
+      "status": "ok",
+      "failure_reason": null,
+      "sample_count": 1,
+      "median_value": 1000,
+      "min_value": 1000,
+      "max_value": 1000,
+      "mad_value": 0,
+      "checks": {
+        "functional": true
+      }
+    },
+    {
+      "area_id": "ipc",
+      "metric_id": "main",
+      "metric_version": "1",
+      "unit": "ns/op",
+      "direction": "lower_is_better",
+      "primary": true,
+      "weight": 1,
+      "status": "ok",
+      "failure_reason": null,
+      "sample_count": 1,
+      "median_value": 1000,
+      "min_value": 1000,
+      "max_value": 1000,
+      "mad_value": 0,
+      "checks": {
+        "functional": true
+      }
+    },
+    {
+      "area_id": "lifecycle",
+      "metric_id": "main",
+      "metric_version": "1",
+      "unit": "ns/op",
+      "direction": "lower_is_better",
+      "primary": true,
+      "weight": 1,
+      "status": "ok",
+      "failure_reason": null,
+      "sample_count": 1,
+      "median_value": 1000,
+      "min_value": 1000,
+      "max_value": 1000,
+      "mad_value": 0,
+      "checks": {
+        "functional": true
+      }
+    },
+    {
+      "area_id": "filesystem_io",
+      "metric_id": "main",
+      "metric_version": "1",
+      "unit": "bytes/s",
+      "direction": "higher_is_better",
+      "primary": true,
+      "weight": 1,
+      "status": "ok",
+      "failure_reason": null,
+      "sample_count": 1,
+      "median_value": "134217728",
+      "min_value": "134217728",
+      "max_value": "134217728",
+      "mad_value": 0,
+      "checks": {
+        "functional": true
+      }
+    }
+  ],
+  "samples": [
+    {
+      "area_id": "scheduler_sync",
+      "metric_id": "main",
+      "sample_index": 0,
+      "phase": "measurement",
+      "status": "ok",
+      "failure_reason": null,
+      "elapsed_ns": "10000000",
+      "operation_count": "10000",
+      "bytes_processed": null,
+      "value": "1000",
+      "clock_source": "tsc",
+      "clock_generation": "1",
+      "clock_resolution_ns": "1",
+      "observer_overhead_ns": "25"
+    },
+    {
+      "area_id": "memory",
+      "metric_id": "main",
+      "sample_index": 0,
+      "phase": "measurement",
+      "status": "ok",
+      "failure_reason": null,
+      "elapsed_ns": "10000000",
+      "operation_count": "10000",
+      "bytes_processed": null,
+      "value": "1000",
+      "clock_source": "tsc",
+      "clock_generation": "1",
+      "clock_resolution_ns": "1",
+      "observer_overhead_ns": "25"
+    },
+    {
+      "area_id": "ipc",
+      "metric_id": "main",
+      "sample_index": 0,
+      "phase": "measurement",
+      "status": "ok",
+      "failure_reason": null,
+      "elapsed_ns": "10000000",
+      "operation_count": "10000",
+      "bytes_processed": null,
+      "value": "1000",
+      "clock_source": "tsc",
+      "clock_generation": "1",
+      "clock_resolution_ns": "1",
+      "observer_overhead_ns": "25"
+    },
+    {
+      "area_id": "lifecycle",
+      "metric_id": "main",
+      "sample_index": 0,
+      "phase": "measurement",
+      "status": "ok",
+      "failure_reason": null,
+      "elapsed_ns": "10000000",
+      "operation_count": "10000",
+      "bytes_processed": null,
+      "value": "1000",
+      "clock_source": "tsc",
+      "clock_generation": "1",
+      "clock_resolution_ns": "1",
+      "observer_overhead_ns": "25"
+    },
+    {
+      "area_id": "filesystem_io",
+      "metric_id": "main",
+      "sample_index": 0,
+      "phase": "measurement",
+      "status": "ok",
+      "failure_reason": null,
+      "elapsed_ns": "1000000000",
+      "operation_count": "1",
+      "bytes_processed": "134217728",
+      "value": "134217728",
+      "clock_source": "tsc",
+      "clock_generation": "1",
+      "clock_resolution_ns": "1",
+      "observer_overhead_ns": "25"
+    }
+  ],
+  "scores": [
+    {
+      "area_id": "scheduler_sync",
+      "baseline_run_id": "33333333-3333-4333-8333-333333333333",
+      "scoring_version": "example-geomean-1",
+      "score": "100",
+      "status": "valid",
+      "reason": null
+    },
+    {
+      "area_id": "memory",
+      "baseline_run_id": "33333333-3333-4333-8333-333333333333",
+      "scoring_version": "example-geomean-1",
+      "score": "100",
+      "status": "valid",
+      "reason": null
+    },
+    {
+      "area_id": "ipc",
+      "baseline_run_id": "33333333-3333-4333-8333-333333333333",
+      "scoring_version": "example-geomean-1",
+      "score": "100",
+      "status": "valid",
+      "reason": null
+    },
+    {
+      "area_id": "lifecycle",
+      "baseline_run_id": "33333333-3333-4333-8333-333333333333",
+      "scoring_version": "example-geomean-1",
+      "score": "100",
+      "status": "valid",
+      "reason": null
+    },
+    {
+      "area_id": "filesystem_io",
+      "baseline_run_id": "33333333-3333-4333-8333-333333333333",
+      "scoring_version": "example-geomean-1",
+      "score": "100",
+      "status": "valid",
+      "reason": null
+    },
+    {
+      "area_id": "overall",
+      "baseline_run_id": "33333333-3333-4333-8333-333333333333",
+      "scoring_version": "example-geomean-1",
+      "score": "100",
+      "status": "valid",
+      "reason": null
+    }
+  ]
+}

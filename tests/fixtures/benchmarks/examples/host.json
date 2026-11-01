@@ -1,0 +1,20 @@
+{
+  "host_id": "qemu-lab-a",
+  "display_name": "Example Host A",
+  "description": "Synthetic API example, not an actual benchmark host.",
+  "hardware": {
+    "cpu": {
+      "model": "Example CPU A",
+      "architecture": "x86_64"
+    },
+    "logical_cpus": "16",
+    "ram_bytes": "34359738368"
+  },
+  "metadata": {
+    "operating_system": "Debian Linux"
+  },
+  "tags": [
+    "example",
+    "qemu"
+  ]
+}

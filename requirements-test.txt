@@ -1,0 +1,2 @@
+# Only required by the inherited signed artifact fixtures, not by the services.
+cryptography==50.0.2

@@ -1,16 +1,19 @@
 [Unit]
-Description=R4OS Server WebApp
+Description=R4OS Server webapp
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=simple
-DynamicUser=yes
-User=r4os-webapp
+User=r4os-server
+Group=r4os-server
 WorkingDirectory=/opt/r4os-server
 EnvironmentFile=/etc/r4os-server/webapp.env
 Environment=PYTHONUNBUFFERED=1
 ExecStart=/usr/bin/python3 -I -B /opt/r4os-server/WebApp/server.py
+StateDirectory=r4os-server
+StateDirectoryMode=0750
+ReadWritePaths=/var/lib/r4os-server
 Restart=on-failure
 RestartSec=3
 UMask=0077

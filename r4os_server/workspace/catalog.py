@@ -1,0 +1,303 @@
+"""Public R4OSDev inventory and conservative local Git operations."""
+import json
+from pathlib import Path
+import shutil
+import time
+import urllib.error
+import urllib.request
+from urllib.parse import urlsplit
+
+from .store import identifier, now, under
+from . import connections, layout
+
+
+class GitHubError(RuntimeError):
+    def __init__(self, status, detail, rate_limited=False):
+        super().__init__(detail)
+        self.status, self.rate_limited = status, rate_limited
+
+
+class GitHubRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, newurl):
+        if urlsplit(newurl).scheme != "https" or urlsplit(newurl).netloc != "api.github.com":
+            raise RuntimeError("GitHub redirected the request outside its API.")
+        return super().redirect_request(request, fp, code, message, headers, newurl)
+
+
+def public_json(url, token=""):
+    if urlsplit(url).scheme != "https" or urlsplit(url).netloc != "api.github.com":
+        raise ValueError("Unexpected GitHub API address.")
+    request = urllib.request.Request(url, headers={"User-Agent": "R4OS-Server", "Accept": "application/vnd.github+json"})
+    if token:
+        request.add_header("Authorization", "Bearer " + token)
+    try:
+        with urllib.request.build_opener(GitHubRedirect()).open(request, timeout=30) as response:
+            body = response.read(16 * 1024**2 + 1)
+            if len(body) > 16 * 1024**2:
+                raise ValueError("The GitHub response is too large.")
+            return json.loads(body), response.headers
+    except urllib.error.HTTPError as error:
+        if error.code == 401:
+            raise GitHubError(401, "GitHub rejected the token. Edit the connection to replace or remove it.") from None
+        if error.code in (403, 429):
+            reset = error.headers.get("X-RateLimit-Reset", "")
+            limited = error.code == 429 or error.headers.get("X-RateLimit-Remaining") == "0" or bool(error.headers.get("Retry-After"))
+            raise GitHubError(error.code, "GitHub denied this request or its rate limit has been reached. Check token permissions or retry later. Reset: " + reset, limited) from None
+        if error.code == 404:
+            raise GitHubError(404, "GitHub account not found or this token cannot access it. Check the connection address and account type.") from None
+        raise GitHubError(error.code, "GitHub is currently unavailable (HTTP " + str(error.code) + ").") from None
+
+
+def pages(context, endpoint, credential=""):
+    for page in range(1, 101):
+        context.check()
+        items, headers = public_json(endpoint + "&per_page=100&sort=full_name&page=" + str(page), credential) if credential else public_json(endpoint + "&per_page=100&sort=full_name&page=" + str(page))
+        if not isinstance(items, list):
+            raise RuntimeError("Invalid repository list from GitHub.")
+        yield from items
+        if 'rel="next"' not in headers.get("Link", ""):
+            return
+    raise RuntimeError("Too many GitHub catalogue pages; keeping the last complete inventory.")
+
+
+def refresh(context, connection_id="main"):
+    store, found = context.store, {}
+    connection = connections.get(store, connection_id)
+    if connection["status"] != "ready":
+        raise ValueError("This connection is being deleted.")
+    owner = connection["owner"]
+    credential = connections.token(store, connection_id)
+    context.phase("Fetching repositories: " + owner)
+    kind = "orgs" if connection["account_type"] == "organisation" else "users"
+    public_type = "public" if kind == "orgs" else "owner"
+    streams = [(f"https://api.github.com/{kind}/{owner}/repos?type={public_type}", "", False)]
+    if credential:
+        endpoint = f"https://api.github.com/orgs/{owner}/repos?type=private" if kind == "orgs" else "https://api.github.com/user/repos?visibility=private&affiliation=owner,collaborator,organization_member"
+        streams.append((endpoint, credential, True))
+    for endpoint, auth, private in streams:
+        items = pages(context, endpoint, auth)
+        for item in items:
+            if bool(item.get("private")) != private or item.get("owner", {}).get("login", "").lower() != owner.lower():
+                continue
+            name = identifier(item["name"])
+            readable, access_error = True, ""
+            if private:
+                try:
+                    branches, _ = public_json(f"https://api.github.com/repos/{owner}/{name}/branches?per_page=1", credential)
+                    if not isinstance(branches, list):
+                        raise RuntimeError("Invalid branch list from GitHub.")
+                except GitHubError as error:
+                    if error.status not in (403, 404) or error.rate_limited:
+                        raise
+                    readable, access_error = False, "The token cannot read this repository. Check its Contents permission and refresh the connection."
+            found[int(item["id"])] = {"name": name, "id": int(item["id"]), "description": item.get("description") or "",
+                          "display_name": name, "owner": owner,
+                          "url": f"https://github.com/{owner}/{name}", "clone_url": f"https://github.com/{owner}/{name}.git",
+                          "default_branch": item["default_branch"], "language": item.get("language"),
+                          "archived": bool(item.get("archived")), "disabled": bool(item.get("disabled")),
+                          "size_kib": item.get("size", 0), "pushed_at": item.get("pushed_at"), "fetched_at": now(),
+                          "private": private, "visibility": "private" if private else "public", "read_access": readable,
+                          "access_revision": connection["revision"], "access_error": access_error,
+                          "permissions": {key: bool(value) for key, value in item.get("permissions", {}).items() if key in ("pull", "push", "admin")}}
+    with store.connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        latest = connections.get(store, connection_id, db=db)
+        if latest["revision"] != connection["revision"] or latest["status"] != "ready":
+            raise ValueError("The connection changed during the catalogue refresh. Refresh it again.")
+        db.execute("UPDATE repositories SET present=0 WHERE connection_id=?", (connection_id,))
+        for item in found.values():
+            prior = db.execute("SELECT name,directory,enabled,metadata FROM repositories WHERE connection_id=? AND github_id=?", (connection_id, item["id"])).fetchone()
+            key = prior["name"] if prior else item["name"] if connection_id == "main" else connection_id + "." + str(item["id"])
+            if not prior and db.execute("SELECT 1 FROM repositories WHERE name=?", (key,)).fetchone():
+                key = connection_id + "." + str(item["id"])
+            item["name"] = key
+            directory = prior["directory"] if prior else layout.allocate(store, db, connection, item)
+            enabled = prior["enabled"] if prior else int(connection_id == "main" and not item["private"])
+            if prior and item["private"] and not json.loads(prior["metadata"]).get("private"):
+                enabled = 0
+            db.execute("""INSERT INTO repositories(name,github_id,metadata,present,connection_id,enabled,directory) VALUES(?,?,?,1,?,?,?)
+                ON CONFLICT(name) DO UPDATE SET metadata=excluded.metadata,present=1,enabled=excluded.enabled""",
+                       (key, item["id"], json.dumps(item, ensure_ascii=False), connection_id, enabled, directory))
+        status = {"updated": now(), "time": time.time(), "error": "", "count": len(found)}
+        db.execute("UPDATE connections SET catalog=? WHERE id=?", (json.dumps(status), connection_id))
+    if connection_id == "main":
+        store.set("catalog", status)
+    for item in store.repositories(connection_id):
+        if item["available"] and (repository_path(store, item).exists() or item["local"].get("commit")):
+            inspect(context, item["name"], remote=True)
+    return {"count": len(found), "connection_id": connection_id}
+
+
+def repository_path(store, repo):
+    return layout.repository_path(store, repo)
+
+
+def reconcile_missing(store):
+    for repo in store.repositories(enabled_only=False):
+        if not repo["local"].get("commit"):
+            continue
+        try:
+            missing = not repository_path(store, repo).exists()
+        except ValueError:
+            continue
+        if missing:
+            directory = layout.directory(store, repo)
+            store.local(repo["name"], {"status": "missing", "directory": directory, "path": store.project_root + "/Repositories/" + directory})
+
+
+def inspect(context, name, remote=True):
+    store = context.store
+    repo = store.require_repository(name)
+    target = repository_path(store, repo)
+    previous = repo["local"]
+    directory = layout.directory(store, repo)
+    local = {"status": "missing", "directory": directory, "path": store.project_root + "/Repositories/" + directory}
+    if not target.exists():
+        store.local(name, local)
+        return local
+    if target.is_symlink() or not (target / ".git").is_dir():
+        local.update(status="conflict", detail="The destination is not a managed Git checkout.")
+        store.local(name, local)
+        return local
+    origin, _ = context.git(target, "remote", "get-url", "origin")
+    if origin.strip() != repo["clone_url"]:
+        local.update(status="conflict", detail="The remote address differs from the connection catalogue.")
+        store.local(name, local)
+        return local
+    head, code = context.git(target, "rev-parse", "--verify", "HEAD", check=False)
+    if code:
+        local.update(status="empty", detail="The repository has no commits yet.")
+        store.local(name, local)
+        return local
+    branch, _ = context.git(target, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
+    dirty, _ = context.git(target, "status", "--porcelain=v1", "--untracked-files=normal")
+    local.update(commit=head.strip(), branch=branch.strip(), dirty=bool(dirty.strip()), changes=dirty.splitlines()[:40],
+                 checked_at=previous.get("checked_at"), remote_commit=previous.get("remote_commit"),
+                 modules=previous.get("modules", []), profile=previous.get("profile", {}))
+    if local["dirty"]:
+        local.update(status="modified", detail="Local changes have been preserved.")
+    elif local["branch"] != repo["default_branch"]:
+        local.update(status="diverged", detail="The local branch differs from the default branch.")
+    elif remote:
+        try:
+            remote_value, _ = context.repository_git(repo, "ls-remote", "--exit-code", repo["clone_url"], "refs/heads/" + repo["default_branch"], quiet=True, timeout=60)
+            latest = remote_value.split()[0]
+            local.update(remote_commit=latest, checked_at=now(), status="current")
+            if latest != local["commit"]:
+                context.repository_git(repo, "-C", target, "fetch", "--no-tags", "--no-recurse-submodules", "origin", repo["default_branch"], quiet=True, timeout=120)
+                _, behind = context.git(target, "merge-base", "--is-ancestor", "HEAD", "FETCH_HEAD", check=False)
+                _, ahead = context.git(target, "merge-base", "--is-ancestor", "FETCH_HEAD", "HEAD", check=False)
+                local["status"] = "outdated" if behind == 0 else "ahead" if ahead == 0 else "diverged"
+        except (OSError, RuntimeError) as error:
+            local.update(status="unknown", detail=str(error))
+    elif local["remote_commit"] == local["commit"]:
+        local["status"] = "current"
+    else:
+        local["status"] = "unknown"
+    try:
+        from .profiles import scan, validate
+        local.update(validate(context, target, scan(target, repo["display_name"])))
+    except (OSError, ValueError) as error:
+        local.update(profile={"ready": False, "reason": str(error)})
+    store.local(name, local)
+    try:
+        from .releases import import_defaults
+        if repo["connection_id"] == "main" and all(module.get("validated") or "manifest" not in module for module in local.get("modules", [])):
+            import_defaults(store, name, local, target)
+    except ImportError:
+        pass
+    return local
+
+
+def download(context, name):
+    store, repo = context.store, context.store.require_repository(name)
+    if not repo["listed"] or repo.get("disabled"):
+        raise ValueError("The repository is no longer available to this connection.")
+    target = repository_path(store, repo)
+    if target.exists():
+        return inspect(context, name)
+    context.phase("Downloading repository: " + name)
+    layout.ensure_folder(store, connections.get(store, repo["connection_id"]))
+    scratch = target.parent / (".staging-" + identifier(context.job["id"]) + "-" + identifier(name))
+    scratch.parent.mkdir(parents=True, exist_ok=True)
+    if scratch.exists():
+        shutil.rmtree(scratch)
+    try:
+        context.repository_git(repo, "clone", "--no-hardlinks", "--", repo["clone_url"], scratch, timeout=1800)
+        context.git(scratch, "remote", "set-url", "--push", "origin", "disabled://local-only")
+        scratch.rename(target)
+    finally:
+        if scratch.exists():
+            shutil.rmtree(scratch)
+    return inspect(context, name)
+
+
+def update(context, name):
+    local = inspect(context, name)
+    if local["status"] == "current":
+        return local
+    if local["status"] != "outdated":
+        raise ValueError(local.get("detail") or "The checkout is not ready for a fast-forward update: " + local["status"])
+    context.phase("Updating repository: " + name)
+    context.git(repository_path(context.store, context.store.repository(name)), "merge", "--ff-only", "--no-edit", "FETCH_HEAD")
+    return inspect(context, name)
+
+
+def update_selected(context, targets, connection_id=None):
+    if not isinstance(targets, list) or not targets:
+        raise ValueError("This update job has no saved targets. Use Refresh and start Update all again.")
+    for target in targets:
+        if (not isinstance(target, dict) or not isinstance(target.get("name"), str)
+                or not isinstance(target.get("connection_id"), str) or not isinstance(target.get("github_id"), int)
+                or (connection_id and target["connection_id"] != connection_id)):
+            raise ValueError("Invalid saved update targets. Use Refresh and start Update all again.")
+    results = []
+    for index, target in enumerate(targets, 1):
+        context.check()
+        name = target["name"]
+        context.phase(f"Update target {index}/{len(targets)}: {name}")
+        try:
+            try:
+                repo = context.store.repository(name)
+            except ValueError:
+                results.append({"name": name, "status": "skipped", "detail": "The repository has been removed."})
+                continue
+            if (repo["connection_id"] != target["connection_id"] or repo["id"] != target["github_id"]
+                    or not repo["enabled"] or not repo["available"]
+                    or connections.get(context.store, repo["connection_id"])["status"] != "ready"):
+                results.append({"name": name, "status": "skipped", "detail": "The repository is no longer available for this update job."})
+                continue
+            if not repository_path(context.store, repo).exists():
+                inspect(context, name)
+                results.append({"name": name, "status": "skipped", "detail": "The local checkout no longer exists."})
+                continue
+            value = update(context, name)
+            unchanged = value["status"] == "current" and value.get("commit") == repo["local"].get("commit")
+            result = {"name": name, "status": "skipped" if unchanged else value["status"]}
+            if unchanged:
+                result["detail"] = "Already up to date."
+            results.append(result)
+        except (OSError, ValueError, RuntimeError) as error:
+            context.log(name + ": " + str(error))
+            results.append({"name": name, "status": "failed", "error": str(error)})
+    return {"repositories": results, "target_count": len(targets), "failed": sum(item["status"] == "failed" for item in results)}
+
+
+def batch(context, action, connection_id=None, *, targets=None):
+    if action == "update":
+        return update_selected(context, targets, connection_id)
+    results = []
+    for repo in context.store.repositories(connection_id):
+        context.check()
+        name = repo["name"]
+        try:
+            present = repository_path(context.store, repo).exists()
+            if present or not repo["available"]:
+                results.append({"name": name, "status": "skipped"})
+                continue
+            value = download(context, name)
+            results.append({"name": name, "status": value["status"]})
+        except (OSError, ValueError, RuntimeError) as error:
+            context.log(name + ": " + str(error))
+            results.append({"name": name, "status": "failed", "error": str(error)})
+    return {"repositories": results, "failed": sum(item["status"] == "failed" for item in results)}

@@ -1,6 +1,13 @@
 # Dieses Verzeichnis bleibt ausschließlich lokal.
 /Private/
 
+# Auch versehentlich nach Source/ kopierte Forschungsarchive bleiben lokal.
+/Research/
+/Repositories/
+/BuildTools/
+/Artifacts/
+/Release/
+
 # Lokale Python-Bytecode-Dateien.
 __pycache__/
 *.py[cod]

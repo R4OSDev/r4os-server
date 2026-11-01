@@ -1,0 +1,36 @@
+[Unit]
+Description=R4OS Server local repository and build worker
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=r4os-builder
+Group=r4os-workspace
+WorkingDirectory=/var/lib/r4os-workspace
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -I -B /opt/r4os-server/Workspace.py
+Restart=on-failure
+RestartSec=3
+UMask=0007
+ReadWritePaths=/var/lib/r4os-workspace
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+InaccessiblePaths=/etc/r4os-server
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+TasksMax=512
+MemoryHigh=6G
+MemoryMax=8G
+TimeoutStopSec=10
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target

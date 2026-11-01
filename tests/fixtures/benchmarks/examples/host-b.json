@@ -1,0 +1,20 @@
+{
+  "host_id": "qemu-lab-b",
+  "display_name": "Example Host B",
+  "description": "Synthetic second host for cross-host scores.",
+  "hardware": {
+    "cpu": {
+      "model": "Example CPU B",
+      "architecture": "x86_64"
+    },
+    "logical_cpus": "16",
+    "ram_bytes": "34359738368"
+  },
+  "metadata": {
+    "operating_system": "Debian Linux"
+  },
+  "tags": [
+    "example",
+    "qemu"
+  ]
+}

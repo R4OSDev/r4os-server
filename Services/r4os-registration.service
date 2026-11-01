@@ -1,0 +1,38 @@
+[Unit]
+Description=R4OS Server registration
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=r4os-server
+Group=r4os-server
+WorkingDirectory=/opt/r4os-server
+Environment=R4OS_SERVER_CONFIG=/etc/r4os-server/server.json
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -I -B /opt/r4os-server/Run.py registration
+StateDirectory=r4os-server
+StateDirectoryMode=0750
+ReadWritePaths=/var/lib/r4os-server
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectHome=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+CapabilityBoundingSet=
+IPAddressDeny=any
+IPAddressAllow=localhost
+IPAddressAllow=10.0.0.0/8
+IPAddressAllow=172.16.0.0/12
+IPAddressAllow=192.168.0.0/16
+
+[Install]
+WantedBy=multi-user.target
