@@ -170,3 +170,13 @@ def evaluate(run, baseline):
         if result["areas"]["overall"]["status"] == "valid":
             result["status"] = "valid"
     return result
+
+
+def calculate_from_measurements(run, baseline):
+    """Compute independently of the scores reported against the client's reference."""
+    current = dict(run, baseline_run_id=baseline["run_id"], scores=[])
+    result = evaluate(current, baseline)
+    for area in result["areas"].values():
+        del area["reported_score"]
+        del area["reported_matches"]
+    return result

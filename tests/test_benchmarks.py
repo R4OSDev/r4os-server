@@ -471,7 +471,7 @@ class HostClaimTests(unittest.TestCase):
             self.store = Store(self.store.path)
             self.assertEqual(contents(), before)
         with self.store.connection() as db:
-            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 5)
             self.assertEqual(db.execute("SELECT count(*) FROM host_identities").fetchone()[0], 0)
         with self.assertRaisesRegex(HostClaimConflict, "host_id_in_use"):
             self.store.claim_host(*normalize_claim(occupied_id, claim_document()))

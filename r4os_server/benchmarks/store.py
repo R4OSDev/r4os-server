@@ -8,6 +8,7 @@ import sqlite3
 
 from .models import AREAS, InvalidData, VERSION_FIELDS, canonical, fingerprint, host_id, now, timestamp, uuid
 from .scoring import evaluate
+from . import baseline as automatic_baseline
 from .subsystems import (SCHEMA as SUBSYSTEM_SCHEMA, validate as validate_subsystem,
                          compare as compare_subsystems, observations as subsystem_observations)
 
@@ -89,17 +90,18 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3, 4):
+            if version not in (0, 1, 2, 3, 4, 5):
                 raise ValueError("Unsupported DevCenter database version.")
             connection.execute("PRAGMA journal_mode=WAL")
-            connection.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + SUBSYSTEM_SCHEMA)
+            connection.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + SUBSYSTEM_SCHEMA + automatic_baseline.SCHEMA)
             columns={row['name'] for row in connection.execute('PRAGMA table_info(subsystem_runs)')}
             if 'summary_json' not in columns:
                 connection.execute('ALTER TABLE subsystem_runs ADD COLUMN summary_json TEXT')
             for row in connection.execute('SELECT run_id,payload_json FROM subsystem_runs WHERE summary_json IS NULL'):
                 connection.execute('UPDATE subsystem_runs SET summary_json=? WHERE run_id=?',
                                    (self._subsystem_summary(json.loads(row['payload_json'])),row['run_id']))
-            connection.execute('PRAGMA user_version=4')
+            automatic_baseline.backfill(connection)
+            connection.execute('PRAGMA user_version=5')
             connection.commit()
 
     @staticmethod
@@ -235,8 +237,17 @@ class Store:
             score_fields = ("run_id", "area_id", "baseline_run_id", "scoring_version", "score", "status", "reason")
             connection.executemany("INSERT INTO scores VALUES (?, ?, ?, ?, ?, ?, ?)", (
                 tuple(item[key] for key in score_fields) for item in run["scores"]))
+            automatic_baseline.register(connection, run)
             validation = self._validation(connection, scoring_input)
         return True, validation
+
+    def server_scoring(self, identifier):
+        identifier = uuid(identifier, "run_id")
+        with self.connection() as connection:
+            row = connection.execute("SELECT scoring_input_json FROM benchmark_runs WHERE run_id=?", (identifier,)).fetchone()
+            if row is None:
+                raise NotFound("run_not_found")
+            return automatic_baseline.assessment(connection, json.loads(row[0]))
 
     def run(self, identifier, *, include_samples=True):
         identifier = uuid(identifier, "run_id")
@@ -251,6 +262,7 @@ class Store:
             data["host_snapshot"] = json.loads(row["host_snapshot_json"])
             data["imported_at_utc"] = row["imported_at_utc"]
             data["score_validation"] = self._validation(connection, data)
+            data["server_scoring"] = automatic_baseline.assessment(connection, data)
             data["sample_total"] = connection.execute("SELECT count(*) FROM samples WHERE run_id=?", (identifier,)).fetchone()[0]
         return data
 
@@ -349,10 +361,14 @@ class Store:
     @staticmethod
     def _filters(query):
         fields = ("host_id", "environment_id", *VERSION_FIELDS, "status", "comparison_key", "baseline_run_id", "instrumentation_mode")
-        allowed = (*fields, "date_from", "date_to", "limit", "offset", "order")
+        allowed = (*fields, "server_baseline_run_id", "date_from", "date_to", "limit", "offset", "order")
         if set(query) - set(allowed):
             raise InvalidData("query", "Unknown filter: " + ", ".join(sorted(set(query) - set(allowed))))
         conditions, values = [], []
+        if query.get("server_baseline_run_id"):
+            conditions.append("EXISTS (SELECT 1 FROM benchmark_baseline_candidates c JOIN benchmark_baselines b ON b.group_id=c.group_id "
+                              "WHERE c.run_id=r.run_id AND b.baseline_run_id=?)")
+            values.append(uuid(query["server_baseline_run_id"], "server_baseline_run_id"))
         for key in fields:
             if query.get(key):
                 value = query[key]
@@ -394,7 +410,7 @@ class Store:
                 run = json.loads(row["scoring_input_json"])
                 item = {key: value for key, value in run.items() if key not in ("environment", "metrics", "scores")}
                 item.update(host_name=row["display_name"], metric_count=len(run["metrics"]), imported_at_utc=row["imported_at_utc"],
-                            score_validation=self._validation(connection, run))
+                            score_validation=self._validation(connection, run), server_scoring=automatic_baseline.assessment(connection, run))
                 items.append(item)
         return {"items": items, "total": total, "limit": limit, "offset": offset}
 
@@ -428,4 +444,9 @@ class Store:
                 "SELECT r.baseline_run_id, count(*) run_count, b.host_id, h.display_name host_name, b.release_version "
                 "FROM benchmark_runs r LEFT JOIN benchmark_runs b ON b.run_id=r.baseline_run_id "
                 "LEFT JOIN hosts h ON h.host_id=b.host_id WHERE r.baseline_run_id IS NOT NULL GROUP BY r.baseline_run_id ORDER BY max(r.started_at_utc) DESC")]
-        return {"versions": versions, "environments": environments, "baselines": baselines, "areas": AREAS}
+            server_baselines = [dict(row) for row in connection.execute(
+                "SELECT b.group_id,b.policy,b.baseline_run_id,b.selected_at_utc,r.host_id,h.display_name host_name,r.release_version, "
+                "(SELECT count(*) FROM benchmark_baseline_candidates c WHERE c.group_id=b.group_id) run_count "
+                "FROM benchmark_baselines b JOIN benchmark_runs r ON r.run_id=b.baseline_run_id JOIN hosts h ON h.host_id=r.host_id "
+                "ORDER BY b.selected_at_utc,b.group_id")]
+        return {"versions": versions, "environments": environments, "baselines": baselines, "server_baselines": server_baselines, "areas": AREAS}

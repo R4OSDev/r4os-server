@@ -101,7 +101,8 @@ class Application:
                 if match:
                     run = normalize_run(match[1], document)
                     created, validation = self.store.put_run(run)
-                    return 201 if created else 200, {"run_id": run["run_id"], "stored": True, "duplicate": not created, "score_validation": validation}
+                    return 201 if created else 200, {"run_id": run["run_id"], "stored": True, "duplicate": not created,
+                                                    "score_validation": validation, "server_scoring": self.store.server_scoring(run["run_id"])}
                 match = re.fullmatch(r"/api/v1/subsystem-benchmark-runs/([^/]+)", path)
                 if match:
                     run = normalize_subsystem(match[1], document)
