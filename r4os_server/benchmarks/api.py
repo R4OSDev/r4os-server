@@ -8,7 +8,8 @@ from urllib.parse import parse_qs, urlsplit
 
 from . import NAME, VERSION
 from .models import InvalidData, normalize_host, normalize_run
-from .store import Conflict, NotFound, Store
+from .identity import CLAIM_ROUTE, normalize_claim
+from .store import Conflict, HostClaimConflict, NotFound, Store
 from .subsystems import normalize as normalize_subsystem
 
 LOGGER = logging.getLogger(__name__)
@@ -79,6 +80,16 @@ class Application:
                     if set(query) - {"include_samples"} or query.get("include_samples", "true") not in ("true", "false"):
                         raise InvalidData("query", "include_samples must be true or false.")
                     return 200, self.store.run(match[1], include_samples=query.get("include_samples", "true") == "true")
+            elif method == "POST":
+                match = CLAIM_ROUTE.fullmatch(path)
+                if match is None:
+                    return 405, {"error": "method_not_allowed"}
+                if query:
+                    raise InvalidData("query", "Host claims accept no query parameters.")
+                host, identity = normalize_claim(match[1], document)
+                created, saved = self.store.claim_host(host, identity)
+                return 201 if created else 200, {"host_id": saved["host_id"], "stored": True,
+                                                "created": created, "identity": identity, "host": saved}
             elif method == "PUT":
                 if query:
                     raise InvalidData("query", "PUT accepts no query parameters.")
@@ -104,6 +115,8 @@ class Application:
             return 422, {"error": "validation_error", "path": error.path, "detail": error.message}
         except NotFound as error:
             return 404, {"error": str(error)}
+        except HostClaimConflict as error:
+            return 409, {"error": str(error), "stored": False, "created": False}
         except Conflict as error:
             return 409, {"error": str(error), "stored": False, "duplicate": False}
         except sqlite3.OperationalError:

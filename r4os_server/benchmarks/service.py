@@ -8,6 +8,7 @@ from ..common.http import Handler, HTTPError, LANHTTPServer, configure_server
 from ..registration.state import StateStore as AccessStore
 from .api import Application
 from .models import InvalidData, loads
+from .identity import CLAIM_MAX_BYTES, CLAIM_ROUTE
 
 
 def api_handler(app,policy):
@@ -15,14 +16,25 @@ def api_handler(app,policy):
         def route(self):
             try:
                 path=urlsplit(self.path).path.rstrip('/')
+                claim=self.command=='POST' and CLAIM_ROUTE.fullmatch(path) is not None
+                write=self.command=='PUT' or claim
                 if not (path=='/api/health' and self.command in ('GET','HEAD')):
-                    if self.command not in ('GET','HEAD','PUT'):
+                    if self.command not in ('GET','HEAD','PUT') and not claim:
                         raise HTTPError(405,'method_not_allowed')
-                    policy.client(self,write=self.command=='PUT')
-                document=loads(self.body(policy.config.benchmark_limit)) if self.command=='PUT' else None
+                    policy.client(self,write=write)
+                document=None
+                if write:
+                    raw=self.body(min(CLAIM_MAX_BYTES,policy.config.benchmark_limit) if claim else policy.config.benchmark_limit)
+                    try:
+                        document=loads(raw)
+                    except InvalidData:
+                        if claim:
+                            raise InvalidData('document','Invalid UTF-8 JSON or duplicate fields.') from None
+                        raise
                 status,result=app.dispatch(self.command,self.path,document)
-                if self.command=='PUT':
-                    policy.store.audit('benchmark_stored' if status in (200,201) else 'benchmark_rejected',self.source_ip(),path+' '+str(status),'benchmarks')
+                if write:
+                    note=('host_claim' if claim else path)+' '+str(status)
+                    policy.store.audit('benchmark_stored' if status in (200,201) else 'benchmark_rejected',self.source_ip(),note,'benchmarks')
                 self.json(status,result)
             except HTTPError as error:
                 self.json(error.status,error.body,{'WWW-Authenticate':'Bearer realm="R4OS Server"'} if error.status==401 else None)
@@ -35,6 +47,12 @@ def api_handler(app,policy):
                 return
 
         do_GET=do_HEAD=do_PUT=do_POST=do_PATCH=do_DELETE=route
+
+        def log_message(self,fmt,*args):
+            if CLAIM_ROUTE.fullmatch(urlsplit(self.path).path.rstrip('/')):
+                logging.info('%s %s host_claim %s',self.client_address[0],self.command,getattr(self,'response_status','-'))
+            else:
+                super().log_message(fmt,*args)
     return API
 
 

@@ -103,8 +103,8 @@ class ServiceTests(unittest.TestCase):
         private_benchmarks=self.start(benchmarks(config))
         benchmark=self.start(public_benchmarks(config,private_benchmarks))
         context=ssl.create_default_context(cafile=str(certificate))
-        def request(server,path,method='GET',body=None,token=None):
-            client=HTTPSConnection('127.0.0.2',server.server_port,context=context,timeout=3,
+        def request(server,path,method='GET',body=None,token=None,hostname='127.0.0.2'):
+            client=HTTPSConnection(hostname,server.server_port,context=context,timeout=3,
                                    source_address=('127.0.0.3',0))
             headers={'Content-Type':'application/json','X-Real-IP':'198.51.100.12'}
             if token:headers['Authorization']='Bearer '+token
@@ -114,7 +114,10 @@ class ServiceTests(unittest.TestCase):
                 return response.status,json.loads(response.read())
             finally:
                 client.close()
+        from test_benchmarks import CLAIM_ID, claim_document
+        claim_route='/api/v1/hosts/'+CLAIM_ID+'/claim'
         self.assertEqual(request(updates,'/catalog.json')[0],401)
+        self.assertEqual(request(benchmark,claim_route,'POST',claim_document(),config.benchmark_token)[0],401)
         with socket.create_connection(registration.server_address,source_address=('127.0.0.3',0),timeout=3) as raw:
             with context.wrap_socket(raw,server_hostname='127.0.0.2') as client:
                 client.sendall(config.registration_secret.encode())
@@ -126,6 +129,13 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(request(benchmark,'/api/v1/hosts/public-client','PUT',{'display_name':'Client'})[0],401)
         self.assertEqual(request(benchmark,'/api/v1/hosts/public-client','PUT',{'display_name':'Client'},config.benchmark_token)[0],201)
         self.assertEqual(request(benchmark,'/api/v1/hosts')[0],200)
+        self.assertEqual(request(benchmark,claim_route,'POST',claim_document())[0],401)
+        self.assertEqual(request(benchmark,claim_route,'POST',claim_document(),config.publisher_token)[0],403)
+        status,claimed=request(benchmark,claim_route,'POST',claim_document(),config.benchmark_token)
+        self.assertEqual((status,claimed['created']),(201,True))
+        status,repeated=request(private_benchmarks,claim_route,'POST',claim_document('New suggestion'),config.benchmark_token,hostname='127.0.0.1')
+        self.assertEqual((status,repeated['created'],repeated['host']),(200,False,claimed['host']))
+        self.assertEqual(request(benchmark,claim_route,'POST',claim_document(digest='c'*64),config.benchmark_token)[0],409)
         with socket.create_connection(registration.server_address,timeout=3) as client:
             client.sendall(b'plain-magic-is-not-tls\n')
             try:reply=client.recv(2)

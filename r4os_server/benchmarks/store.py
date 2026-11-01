@@ -16,6 +16,17 @@ CREATE TABLE IF NOT EXISTS hosts (
     host_id TEXT PRIMARY KEY, display_name TEXT NOT NULL, document_json TEXT NOT NULL,
     created_at_utc TEXT NOT NULL, updated_at_utc TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS host_identities (
+    host_id TEXT PRIMARY KEY REFERENCES hosts(host_id),
+    method TEXT NOT NULL CHECK(method='smbios-system-uuid-sha256-v1'),
+    identity_hash TEXT NOT NULL CHECK(length(identity_hash)=64 AND identity_hash NOT GLOB '*[^0-9a-f]*'),
+    created_at_utc TEXT NOT NULL,
+    UNIQUE(method, identity_hash)
+);
+CREATE TRIGGER IF NOT EXISTS host_identity_no_update BEFORE UPDATE ON host_identities
+BEGIN SELECT RAISE(ABORT, 'host_identity_immutable'); END;
+CREATE TRIGGER IF NOT EXISTS host_identity_no_delete BEFORE DELETE ON host_identities
+BEGIN SELECT RAISE(ABORT, 'host_identity_immutable'); END;
 CREATE TABLE IF NOT EXISTS environments (
     snapshot_id TEXT PRIMARY KEY, environment_id TEXT NOT NULL, host_id TEXT NOT NULL REFERENCES hosts(host_id),
     document_json TEXT NOT NULL
@@ -64,6 +75,10 @@ class Conflict(Exception):
     pass
 
 
+class HostClaimConflict(Conflict):
+    pass
+
+
 class NotFound(Exception):
     pass
 
@@ -74,7 +89,7 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version not in (0, 1, 2, 3):
+            if version not in (0, 1, 2, 3, 4):
                 raise ValueError("Unsupported DevCenter database version.")
             connection.execute("PRAGMA journal_mode=WAL")
             connection.executescript("BEGIN IMMEDIATE;\n" + SCHEMA + SUBSYSTEM_SCHEMA)
@@ -84,7 +99,7 @@ class Store:
             for row in connection.execute('SELECT run_id,payload_json FROM subsystem_runs WHERE summary_json IS NULL'):
                 connection.execute('UPDATE subsystem_runs SET summary_json=? WHERE run_id=?',
                                    (self._subsystem_summary(json.loads(row['payload_json'])),row['run_id']))
-            connection.execute('PRAGMA user_version=3')
+            connection.execute('PRAGMA user_version=4')
             connection.commit()
 
     @staticmethod
@@ -133,6 +148,29 @@ class Store:
                     host["display_name"], canonical(host), moment, host["host_id"]))
             row = connection.execute("SELECT * FROM hosts WHERE host_id=?", (host["host_id"],)).fetchone()
         return created, self._host(row)
+
+    def claim_host(self, host, identity):
+        identifier = host["host_id"]
+        with self.connection(write=True) as connection:
+            row = connection.execute("SELECT * FROM hosts WHERE host_id=?", (identifier,)).fetchone()
+            if row is not None:
+                binding = connection.execute("SELECT method, identity_hash FROM host_identities WHERE host_id=?", (identifier,)).fetchone()
+                if binding is None:
+                    raise HostClaimConflict("host_id_in_use")
+                if (binding["method"], binding["identity_hash"]) != (identity["method"], identity["hash"]):
+                    raise HostClaimConflict("host_identity_conflict")
+                return False, self._host(row)
+            occupied = connection.execute("SELECT 1 FROM host_identities WHERE method=? AND identity_hash=?",
+                                          (identity["method"], identity["hash"])).fetchone()
+            if occupied is not None:
+                raise HostClaimConflict("host_identity_in_use")
+            moment = now()
+            connection.execute("INSERT INTO hosts VALUES (?, ?, ?, ?, ?)",
+                               (identifier, host["display_name"], canonical(host), moment, moment))
+            connection.execute("INSERT INTO host_identities VALUES (?, ?, ?, ?)",
+                               (identifier, identity["method"], identity["hash"], moment))
+            row = connection.execute("SELECT * FROM hosts WHERE host_id=?", (identifier,)).fetchone()
+        return True, self._host(row)
 
     def hosts(self, identifier=None):
         parameters = []

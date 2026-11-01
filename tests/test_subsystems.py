@@ -141,7 +141,7 @@ class SubsystemTests(unittest.TestCase):
             connection.execute("PRAGMA user_version=1")
         reopened = Store(self.path)
         with reopened.connection() as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
             self.assertEqual(connection.execute("SELECT payload_json FROM benchmark_runs").fetchone()[0], before)
         self.assertEqual(reopened.run(legacy["run_id"])["score_validation"]["status"], "valid")
         self.assertTrue(reopened.put_subsystem_run(normalize((raw := fixture())["run_id"], raw))[0])

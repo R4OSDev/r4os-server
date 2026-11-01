@@ -1,6 +1,6 @@
 """Import, persistence and scoring contracts using isolated temporary databases."""
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import replace
 from decimal import Decimal
@@ -18,10 +18,26 @@ from r4os_server.benchmarks.api import Application
 from r4os_server.common.config import Config
 
 from r4os_server.benchmarks.models import AREAS, InvalidData, MAX_U64, loads, normalize_host, normalize_run
-from r4os_server.benchmarks.store import Conflict, Store
+from r4os_server.benchmarks.identity import IDENTITY_METHOD, normalize_claim
+from r4os_server.benchmarks.store import Conflict, HostClaimConflict, Store
 
 ROOT = Path(__file__).resolve().parent / "fixtures/benchmarks"
 TOKEN = "test-only-token-not-a-real-credential"
+CLAIM_ID = "hw1-" + "a" * 60
+
+
+def claim_document(name="Automatic host", digest="b" * 64):
+    return {"display_name": name, "identity": {"method": IDENTITY_METHOD, "hash": digest}}
+
+
+def process_claim(arguments):
+    path, identifier, document = arguments
+    store = Store(path)
+    try:
+        created, _ = store.claim_host(*normalize_claim(identifier, document))
+        return 201 if created else 200
+    except HostClaimConflict:
+        return 409
 
 
 def host(identifier="host-a", name="Host A"):
@@ -339,6 +355,131 @@ from r4os_server.benchmarks.service import create_server as benchmark_server
 from WebApp.server import create_server as web_server
 
 
+class HostClaimTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.store = Store(Path(self.temp.name) / "claims.sqlite3")
+
+    def snapshot(self):
+        with self.store.connection() as db:
+            return {name: [tuple(row) for row in db.execute("SELECT * FROM " + name + " ORDER BY 1")]
+                    for name in ("hosts", "host_identities")}
+
+    def test_claim_retry_preserves_manual_metadata_timestamps_and_binding(self):
+        document = claim_document()
+        created, first = self.store.claim_host(*normalize_claim(CLAIM_ID, document))
+        self.assertTrue(created)
+        edited = {key: value for key, value in first.items() if not key.endswith("_at_utc")}
+        edited.update(display_name="Editorial name", description="Keep this", tags=["native"],
+                      metadata={"owner_note": "preserve"}, hardware={"logical_cpus": 8})
+        self.store.put_host(normalize_host(CLAIM_ID, edited))
+        before = self.snapshot()
+        request = claim_document("Changed creation suggestion")
+        created, saved = self.store.claim_host(*normalize_claim(CLAIM_ID, request))
+        self.assertFalse(created)
+        self.assertEqual(saved["display_name"], "Editorial name")
+        self.assertEqual(saved["tags"], ["native"])
+        self.assertEqual(saved["metadata"], {"owner_note": "preserve"})
+        self.assertEqual(self.snapshot(), before)
+        self.store = Store(self.store.path)
+        self.assertFalse(self.store.claim_host(*normalize_claim(CLAIM_ID, request))[0])
+        self.assertEqual(self.snapshot(), before)
+
+    def test_claim_conflicts_never_adopt_or_modify_occupied_hosts(self):
+        self.store.claim_host(*normalize_claim(CLAIM_ID, claim_document()))
+        occupied_id = "hw1-" + "c" * 60
+        self.store.put_host(normalize_host(occupied_id, {"display_name": "Existing manual host", "tags": ["historic"]}))
+        before = self.snapshot()
+        for identifier, document, reason in (
+            (CLAIM_ID, claim_document(digest="c" * 64), "host_identity_conflict"),
+            ("hw1-" + "d" * 60, claim_document(), "host_identity_in_use"),
+            (occupied_id, claim_document(digest="e" * 64), "host_id_in_use"),
+        ):
+            with self.subTest(reason=reason):
+                with self.assertRaisesRegex(HostClaimConflict, "^" + reason + "$"):
+                    self.store.claim_host(*normalize_claim(identifier, document))
+                self.assertEqual(self.snapshot(), before)
+
+    def test_parallel_process_claims_have_one_creation_and_consistent_conflicts(self):
+        with ProcessPoolExecutor(max_workers=4) as pool:
+            results = list(pool.map(process_claim, [(str(self.store.path), CLAIM_ID, claim_document())] * 8))
+        self.assertEqual(sorted(results), [200] * 7 + [201])
+        other_id = "hw1-" + "e" * 60
+        with ProcessPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(process_claim, [
+                (str(self.store.path), other_id, claim_document(digest="1" * 64)),
+                (str(self.store.path), other_id, claim_document(digest="2" * 64)),
+            ]))
+        self.assertEqual(sorted(results), [201, 409])
+        snapshot = self.snapshot()
+        self.assertEqual(len(snapshot["hosts"]), 2)
+        self.assertEqual(len(snapshot["host_identities"]), 2)
+
+    def test_parallel_manual_put_and_claim_preserve_manual_document(self):
+        barrier = threading.Barrier(2)
+        def claim():
+            barrier.wait()
+            return process_claim((str(self.store.path), CLAIM_ID, claim_document()))
+        def manual():
+            barrier.wait()
+            return self.store.put_host(normalize_host(CLAIM_ID, {"display_name": "Manual", "tags": ["keep"]}))[0]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            claimed = pool.submit(claim)
+            edited = pool.submit(manual)
+            status, manual_created = claimed.result(), edited.result()
+        self.assertEqual(status, 409 if manual_created else 201)
+        saved = self.store.hosts(CLAIM_ID)
+        self.assertEqual((saved["display_name"], saved["tags"]), ("Manual", ["keep"]))
+        self.assertEqual(len(self.snapshot()["host_identities"]), 0 if manual_created else 1)
+
+    def test_claim_binding_is_immutable_and_failed_insert_rolls_back(self):
+        self.store.claim_host(*normalize_claim(CLAIM_ID, claim_document()))
+        before = self.snapshot()
+        for query in ("UPDATE host_identities SET identity_hash='" + "c" * 64 + "'",
+                      "DELETE FROM host_identities"):
+            with self.assertRaisesRegex(sqlite3.IntegrityError, "host_identity_immutable"):
+                with self.store.connection(write=True) as db:
+                    db.execute(query)
+        with self.store.connection(write=True) as db:
+            db.execute("CREATE TRIGGER fail_claim BEFORE INSERT ON host_identities BEGIN SELECT RAISE(ABORT, 'test-claim-failure'); END")
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "test-claim-failure"):
+            self.store.claim_host(*normalize_claim("hw1-" + "d" * 60, claim_document(digest="e" * 64)))
+        self.assertEqual(self.snapshot(), before)
+
+    def test_version3_migration_keeps_manual_hosts_runs_snapshots_and_scores(self):
+        from test_subsystems import fixture as subsystem_fixture
+        self.store.put_host(host())
+        raw = fixture()
+        self.store.put_run(normalize_run(raw["run_id"], raw))
+        from r4os_server.benchmarks.subsystems import normalize
+        snes = subsystem_fixture()
+        self.store.put_subsystem_run(normalize(snes["run_id"], snes))
+        occupied_id = "hw1-" + "c" * 60
+        self.store.put_host(normalize_host(occupied_id, {"display_name": "Historical"}))
+        with self.store.connection(write=True) as db:
+            db.execute("DROP TRIGGER host_identity_no_update")
+            db.execute("DROP TRIGGER host_identity_no_delete")
+            db.execute("DROP TABLE host_identities")
+            db.execute("PRAGMA user_version=3")
+        def contents():
+            with self.store.connection() as db:
+                tables = [row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name!='host_identities' ORDER BY name")]
+                return {name: [tuple(row) for row in db.execute('SELECT * FROM "' + name + '" ORDER BY 1')] for name in tables}
+        before = contents()
+        for _ in range(2):
+            self.store = Store(self.store.path)
+            self.assertEqual(contents(), before)
+        with self.store.connection() as db:
+            self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(db.execute("SELECT count(*) FROM host_identities").fetchone()[0], 0)
+        with self.assertRaisesRegex(HostClaimConflict, "host_id_in_use"):
+            self.store.claim_host(*normalize_claim(occupied_id, claim_document()))
+        self.assertTrue(self.store.claim_host(*normalize_claim(CLAIM_ID, claim_document()))[0])
+        self.assertEqual(self.store.run(raw["run_id"])["score_validation"]["status"], "valid")
+        self.assertEqual(self.store.subsystem_run(snes["run_id"])["validation"]["status"], "valid")
+
+
 def configuration(root, token=TOKEN):
     return Config(data_dir=Path(root),benchmarks_port=0,web_port=0,
         registration_secret="benchmark-test-registration-secret-001",
@@ -453,3 +594,66 @@ class HTTPTests(unittest.TestCase):
         connection.putheader('Content-Length',str(self.api.config.benchmark_limit+1));connection.endheaders()
         response=connection.getresponse();self.assertEqual(response.status,413);response.read();connection.close()
         self.assertEqual(self.request('PUT','/api/v1/hosts/a',raw='{"value":'+ '9'*5000+'}')[0],422)
+
+    def test_http_host_claim_create_retry_and_conflict_contract(self):
+        route='/api/v1/hosts/'+CLAIM_ID+'/claim'
+        document=claim_document()
+        status,body,_=self.request('POST',route,document)
+        self.assertEqual((status,body['created'],body['stored']),(201,True,True))
+        self.assertEqual(body['identity'],document['identity'])
+        host_route='/api/v1/hosts/'+CLAIM_ID
+        edited={key:value for key,value in body['host'].items() if not key.endswith('_at_utc')}
+        edited.update(display_name='Edited manually',tags=['keep'],metadata={'note':'preserve'})
+        self.assertEqual(self.request('PUT',host_route,edited)[0],200)
+        before=self.request('GET',host_route)[1]
+        status,body,_=self.request('POST',route,claim_document('Another suggestion'))
+        self.assertEqual((status,body['created'],body['host']['display_name']),(200,False,'Edited manually'))
+        self.assertEqual(self.request('POST',route,claim_document(digest='c'*64))[0],409)
+        self.assertEqual(self.request('GET',host_route)[1],before)
+        self.assertNotIn('identity',before)
+        status,body,_=self.request('POST','/api/v1/hosts/'+'hw1-'+'d'*60+'/claim',document)
+        self.assertEqual((status,body['error']),(409,'host_identity_in_use'))
+
+    def test_http_host_claim_validation_is_bounded_and_does_not_echo_raw_identity(self):
+        route='/api/v1/hosts/'+CLAIM_ID+'/claim'
+        raw_uuid='00112233-4455-6677-8899-aabbccddeeff'
+        invalid=[]
+        for field,value in (('method','unsupported-v2'),('hash','B'*64),('hash',raw_uuid),('hash','a'*63)):
+            document=claim_document();document['identity'][field]=value;invalid.append(document)
+        for field in ('smbios_uuid','serial_number','hardware','metadata'):
+            document=claim_document();document[field]=raw_uuid;invalid.append(document)
+        document=claim_document();document['identity']['uuid']=raw_uuid;invalid.append(document)
+        with self.assertLogs(level='INFO') as captured:
+            for document in invalid:
+                status,body,_=self.request('POST',route,document)
+                self.assertEqual(status,422)
+                self.assertNotIn(raw_uuid,json.dumps(body))
+            status,body,_=self.request('POST','/api/v1/hosts/'+raw_uuid+'/claim',claim_document())
+            self.assertEqual(status,422);self.assertNotIn(raw_uuid,json.dumps(body))
+            status,body,_=self.request('POST',route,raw='{"'+raw_uuid+'":1,"'+raw_uuid+'":2}')
+            self.assertEqual(status,422);self.assertNotIn(raw_uuid,json.dumps(body))
+        self.assertNotIn(raw_uuid,'\n'.join(captured.output))
+        self.assertEqual(self.request('POST',route,raw='x'*4097)[0],413)
+        self.assertEqual(self.request('POST',route,raw='{}',content_type='text/plain')[0],415)
+        self.assertEqual(self.request('POST',route+'?extra=1',claim_document())[0],422)
+        self.assertEqual(self.request('POST','/api/v1/hosts/'+CLAIM_ID,claim_document())[0],405)
+        self.assertEqual(self.app.store.hosts()['total'],0)
+
+    def test_http_host_claim_keeps_registration_roles_blocks_and_limits(self):
+        route='/api/v1/hosts/'+CLAIM_ID+'/claim'
+        document=claim_document()
+        for token,status in ((None,401),('wrong',401),(self.api.config.publisher_token,403)):
+            self.assertEqual(self.request('POST',route,document,token=token)[0],status)
+        self.api.policy.store.revoke('127.0.0.1')
+        status,body,_=self.request('POST',route,document)
+        self.assertEqual((status,body['error']),(401,'registration_required'))
+        self.api.policy.store.register_magic('127.0.0.1')
+        self.assertEqual(self.request('POST',route,document)[0],201)
+        self.api.policy.store.block_ip('127.0.0.1','isolated-test',3600)
+        status,body,_=self.request('POST',route,document)
+        self.assertEqual((status,body['error']),(403,'registration_required'))
+        self.assertEqual(self.request('POST',route,document,token=self.api.config.admin_token)[0],200)
+        self.api.policy.store.unblock('127.0.0.1','isolated-test')
+        self.api.policy.store.register_magic('127.0.0.1')
+        self.api.policy.store.set_rate('benchmarks',1)
+        self.assertEqual(self.request('POST',route,document)[0],429)
