@@ -16,7 +16,8 @@ StateDirectoryMode=0750
 ReadWritePaths=/var/lib/r4os-server
 Restart=on-failure
 RestartSec=3
-UMask=0077
+# SQLite WAL/SHM files must be group-accessible at creation, before fchmod.
+UMask=0007
 NoNewPrivileges=yes
 PrivateTmp=yes
 PrivateDevices=yes
