@@ -18,6 +18,10 @@ def execute(context):
     kind, subject, payload = job["kind"], job["subject"], job["payload"]
     if kind == "connection_delete":
         return connections.remove(context)
+    if kind == "app_publish":
+        from .apps import publish
+        context.phase("Reading the application manifest")
+        return publish(context.store, subject, {"published": True}, job_id=job['id'], expected_revision=payload['connection_revision'])
     if kind == "catalog":
         keys = [payload["connection_id"]] if payload.get("connection_id") else [item["id"] for item in connections.list_connections(context.store) if item["status"] == "ready"]
         results = []

@@ -21,9 +21,9 @@ window.R4 = (() => {
   ui.table = (headers,rows) => '<div class="table-scroll"><table><thead><tr>'+headers.map(v=>'<th>'+esc(v)+'</th>').join('')+'</tr></thead><tbody>'+rows.map(row=>'<tr>'+row.map(v=>'<td>'+v+'</td>').join('')+'</tr>').join('')+'</tbody></table></div>';
   ui.card = (label,value,note='') => '<div class="metric-card"><span>'+esc(label)+'</span><strong>'+esc(value)+'</strong><small>'+esc(note)+'</small></div>';
   ui.show = (ctx,html) => {if(ctx.generation===ui.generation) content.innerHTML=html;};
-  ui.page = (ctx,title,description,html,actions='',refresh=true) => ui.show(ctx,'<section class="feature-page"><header class="page-heading"><div>'+(ctx.view==='repositories'?'':'<p class="eyebrow">R4OS SERVER / '+esc(ctx.view==='updates'?'UPDATE CENTER':ctx.view==='benchmarks'?'BENCHMARKS':'SETTINGS')+'</p>')+'<h1>'+esc(title)+'</h1>'+(description?'<p class="page-description">'+esc(description)+'</p>':'')+'</div><div class="page-actions">'+actions+(refresh?'<button type="button" class="button subtle" data-action="refresh">Refresh</button>':'')+'</div></header>'+html+'</section>');
+  ui.page = (ctx,title,description,html,actions='',refresh=true) => ui.show(ctx,'<section class="feature-page"><header class="page-heading"><div>'+(ctx.view==='repositories'?'':'<p class="eyebrow">R4OS SERVER / '+esc(ctx.view==='apps'?'APPS':ctx.view==='updates'?'UPDATE CENTER':ctx.view==='benchmarks'?'BENCHMARKS':'SETTINGS')+'</p>')+'<h1>'+esc(title)+'</h1>'+(description?'<p class="page-description">'+esc(description)+'</p>':'')+'</div><div class="page-actions">'+actions+(refresh?'<button type="button" class="button subtle" data-action="refresh">Refresh</button>':'')+'</div></header>'+html+'</section>');
   ui.side = (ctx,items) => {
-    document.querySelector('.submenu-column').innerHTML='<p class="column-caption">'+esc(ctx.view==='updates'?'Update Center':ctx.view==='benchmarks'?'Benchmarks':ctx.view==='repositories'?'Repositories':'Settings')+'</p><nav class="secondary-navigation">'+items.map(([id,label])=>'<a class="sub-item" href="#'+ctx.view+'/'+id+'"'+(ctx.sub===id?' aria-current="page"':'')+'>'+esc(label)+'</a>').join('')+'</nav>';
+    document.querySelector('.submenu-column').innerHTML='<p class="column-caption">'+esc(ctx.view==='apps'?'Apps':ctx.view==='updates'?'Update Center':ctx.view==='benchmarks'?'Benchmarks':ctx.view==='repositories'?'Repositories':'Settings')+'</p><nav class="secondary-navigation">'+items.map(([id,label])=>'<a class="sub-item" href="#'+ctx.view+'/'+id+'"'+(ctx.sub===id?' aria-current="page"':'')+'>'+esc(label)+'</a>').join('')+'</nav>';
   };
   ui.context = (ctx,items=[]) => {
     document.querySelector('.third-column').innerHTML=items.length?'<p class="column-caption">Selection</p><nav class="secondary-navigation">'+items.map(([id,label])=>'<a class="sub-item" href="#'+ctx.view+'/'+ctx.sub+'/'+encodeURIComponent(id)+'"'+((ctx.leaf||'all')===id?' aria-current="page"':'')+'>'+esc(label)+'</a>').join('')+'</nav>':'';
@@ -57,7 +57,6 @@ window.R4 = (() => {
     for(const link of document.querySelectorAll('[data-view]')) {if(link.dataset.view===view)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');}
     const label={apps:'Apps',updates:'Updates',benchmarks:'Benchmarks',repositories:'Repositories',settings:'Settings'}[view];document.title=label+' – R4OS Server';content.setAttribute('aria-label','Workspace: '+label);
     document.querySelector('.submenu-column').innerHTML='';ui.context(ctx);
-    if(view==='apps'){content.replaceChildren();ui.status('Ready.');return;}
     ui.show(ctx,'<div class="loading-state" role="status">Loading data …</div>');
     try {
       if(!ui.views[view]){ui.page(ctx,label,'',ui.empty('This area is being prepared.'));return;}

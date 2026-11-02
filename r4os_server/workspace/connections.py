@@ -369,6 +369,7 @@ def remove(context):
             db.execute("BEGIN IMMEDIATE")
             for name in names:
                 db.execute("DELETE FROM imports WHERE name=?", (name,))
+                db.execute("DELETE FROM apps WHERE repository_name=?", (name,))
             db.execute("DELETE FROM repositories WHERE connection_id=?", (key,))
             db.execute("DELETE FROM connections WHERE id=?", (key,))
         # Release/test references intentionally remain explicit missing sources;

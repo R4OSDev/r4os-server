@@ -37,6 +37,7 @@ STATIC_ROUTES = {
     "/benchmark-actions.js": ("benchmark-actions.js", "text/javascript; charset=utf-8"),
     "/repositories.js": ("repositories.js", "text/javascript; charset=utf-8"),
     "/connections.js": ("connections.js", "text/javascript; charset=utf-8"),
+    "/apps.js": ("apps.js", "text/javascript; charset=utf-8"),
     "/favicon.svg": ("favicon.svg", "image/svg+xml"),
     "/favicon.ico": ("favicon.ico", "image/x-icon"),
     "/apple-touch-icon.png": ("apple-touch-icon.png", "image/png"),
@@ -167,6 +168,9 @@ class WebAppHandler(Handler):
                 self.same_origin()
             if path.startswith("/api/repositories/"):
                 from r4os_server.workspace.api import dispatch
+                return dispatch(self)
+            if path.startswith("/api/apps/"):
+                from r4os_server.workspace.apps import dispatch
                 return dispatch(self)
             if path.startswith(("/api/updates/", "/api/settings/", "/api/benchmarks/")):
                 return self.proxy(config)

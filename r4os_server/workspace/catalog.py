@@ -125,6 +125,9 @@ def refresh(context, connection_id="main"):
     for item in store.repositories(connection_id):
         if item["available"] and (repository_path(store, item).exists() or item["local"].get("commit")):
             inspect(context, item["name"], remote=True)
+        elif item["available"]:
+            from .apps import refresh as refresh_app
+            refresh_app(store, item)
     return {"count": len(found), "connection_id": connection_id}
 
 
@@ -200,6 +203,8 @@ def inspect(context, name, remote=True):
     except (OSError, ValueError) as error:
         local.update(profile={"ready": False, "reason": str(error)})
     store.local(name, local)
+    from .apps import refresh as refresh_app
+    refresh_app(store, repo)
     try:
         from .releases import import_defaults
         if repo["connection_id"] == "main" and all(module.get("validated") or "manifest" not in module for module in local.get("modules", [])):

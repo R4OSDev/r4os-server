@@ -10,7 +10,10 @@ from urllib.parse import urlsplit
 
 ACTIVE = ("queued", "running")
 FOLDERS = ("Repositories", "BuildTools", "Artifacts", "Release")
-REPOSITORY_FIELDS = "r.*,c.status AS connection_status,c.revision AS connection_revision,c.has_token AS connection_has_token,c.catalog AS connection_catalog"
+REPOSITORY_FIELDS = ("r.*,c.status AS connection_status,c.revision AS connection_revision,c.has_token AS connection_has_token,c.catalog AS connection_catalog,"
+                     "COALESCE((SELECT published FROM apps WHERE repository_name=r.name),0) AS app_published,"
+                     "EXISTS(SELECT 1 FROM jobs WHERE kind='app_publish' AND subject=r.name AND status IN ('queued','running') AND cancel=0) AS app_publishing,"
+                     "(SELECT CASE WHEN status='failed' THEN error ELSE '' END FROM jobs WHERE kind='app_publish' AND subject=r.name ORDER BY created DESC,rowid DESC LIMIT 1) AS app_publish_error")
 
 
 def update_candidate(repo):
@@ -75,6 +78,8 @@ class Store:
             initialize_connections(db, self)
             from .repo_metadata import initialize as initialize_metadata
             initialize_metadata(db)
+            from .apps import initialize as initialize_apps
+            initialize_apps(db)
             columns = {row["name"] for row in db.execute("PRAGMA table_info(release_types)")}
             migrate_tests = "test_configuration" not in columns
             if migrate_tests:
@@ -94,6 +99,7 @@ class Store:
         db = sqlite3.connect(self.database, timeout=30)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA busy_timeout=30000")
+        db.execute("PRAGMA foreign_keys=ON")
         try:
             with db:
                 yield db
@@ -121,6 +127,9 @@ class Store:
                      directory=row["directory"],
                      enabled=bool(row["enabled"]), local=english_cache(json.loads(row["local"])), listed=bool(row["present"]))
         value["server_metadata"] = json.loads(row["server_metadata"])
+        value["published"] = bool(row["app_published"])
+        value["publishing"] = bool(row["app_publishing"])
+        value["publish_error"] = row["app_publish_error"] or ""
         value["private"] = bool(value.get("private"))
         reason = ""
         if row["connection_status"] != "ready":

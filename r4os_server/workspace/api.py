@@ -7,7 +7,7 @@ import time
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from ..common.http import HTTPError
-from . import releases, testconfigs, connections, repo_metadata
+from . import releases, testconfigs, connections, repo_metadata, apps
 from .store import ACTIVE, identifier, under, update_candidate
 
 
@@ -94,6 +94,9 @@ def dispatch(handler):
                                       "jobs": store.jobs(), "connections": connections.list_connections(store), "project_root": store.project_root})
         if len(parts) == 3 and parts[0] == "items" and parts[2] == "metadata" and method == "PUT":
             return handler.json(200, repo_metadata.save(store, parts[1], data(handler)))
+        if len(parts) == 3 and parts[0] == "items" and parts[2] == "publication" and method == "PUT":
+            status, result = apps.request_publish(store, parts[1], data(handler))
+            return handler.json(status, result)
         if len(parts) == 2 and parts[0] == "items" and read:
             repo = store.repository(parts[1])
             tools = None
@@ -195,6 +198,8 @@ def dispatch(handler):
         raise HTTPError(404, "not_found")
     except connections.CredentialError as error:
         raise HTTPError(500, "credential_storage_error", str(error)) from None
+    except apps.SourceUnavailable as error:
+        raise HTTPError(502, "source_unavailable", str(error)) from None
     except releases.Conflict as error:
         raise HTTPError(409, "configuration_changed", str(error)) from None
     except (ValueError, KeyError, TypeError) as error:

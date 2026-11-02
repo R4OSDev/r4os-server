@@ -58,7 +58,7 @@
       const local=repo.local||{},busy=jobs.some(job=>job.subject===repo.name||job.kind.endsWith('_all'));
       const classification=repo.server_metadata?.category||'Undefined';
       const sourceAction=local.status==='outdated'?button('Update','update',repo.name,busy||!repo.available||local.dirty,true):button(local.commit||local.status==='empty'?'Downloaded':'Download','download',repo.name,busy||!!local.commit||local.status==='empty'||!repo.available);
-      return '<tr class="repository-entry" data-repo-search="'+E(((repo.display_name||repo.name)+' '+(repo.owner||'')+' '+repo.description).toLowerCase())+'" data-category="'+E(classification)+'" data-account="'+E((repo.owner||'').toLowerCase())+'"><td class="repository-description"><button class="repository-name" data-repo-action="details" data-name="'+E(repo.name)+'">'+E(repo.display_name||repo.name)+'</button>'+(repo.description?'<p class="muted">'+E(repo.description)+'</p>':'')+'<div class="repository-labels"><span class="badge">'+(repo.private?'Private':'Public')+'</span>'+(repo.archived?'<span class="badge">Archived</span>':'')+'</div>'+(!repo.available?'<p class="muted">'+E(repo.unavailable_reason)+'</p>':'')+'</td><td class="repository-category-cell"><span class="badge">'+E(classification)+'</span></td><td class="repository-local" data-local-status="'+E(!repo.available?'unavailable':local.status||'missing')+'">'+status(!repo.available?'Access unavailable':local.status||'missing')+(local.commit?'<p><code>'+E(local.commit.slice(0,12))+'</code> · '+E(local.branch||'')+'</p>':'')+'</td><td class="repository-actions-cell"><span class="repository-owner">'+E(repo.owner||'')+'</span><div class="repo-row-actions">'+sourceAction+button('Edit','edit',repo.name)+'</div></td></tr>';
+      return '<tr class="repository-entry" data-repo-search="'+E(((repo.display_name||repo.name)+' '+(repo.owner||'')+' '+repo.description).toLowerCase())+'" data-category="'+E(classification)+'" data-account="'+E((repo.owner||'').toLowerCase())+'"><td class="repository-description"><button class="repository-name" data-repo-action="details" data-name="'+E(repo.name)+'">'+E(repo.display_name||repo.name)+'</button>'+(repo.description?'<p class="muted">'+E(repo.description)+'</p>':'')+'<div class="repository-labels"><span class="badge">'+(repo.private?'Private':'Public')+'</span>'+(repo.archived?'<span class="badge">Archived</span>':'')+'</div>'+(!repo.available?'<p class="muted">'+E(repo.unavailable_reason)+'</p>':'')+'</td><td class="repository-category-cell"><span class="badge">'+E(classification)+'</span></td><td class="repository-local" data-local-status="'+E(!repo.available?'unavailable':local.status||'missing')+'">'+status(!repo.available?'Access unavailable':local.status||'missing')+(local.commit?'<p><code>'+E(local.commit.slice(0,12))+'</code> · '+E(local.branch||'')+'</p>':'')+'</td><td class="repository-actions-cell"><span class="repository-owner">'+E(repo.owner||'')+'</span><div class="repo-row-actions">'+sourceAction+button('Edit','edit',repo.name)+'<label class="repository-publish"><input type="checkbox" data-repository-publish="'+E(repo.name)+'" aria-label="Publish '+E(repo.display_name||repo.name)+'"'+(repo.published||repo.publishing?' checked':'')+((busy&&!repo.publishing)||(!repo.available&&!repo.published&&!repo.publishing)?' disabled':'')+'>Publish'+(repo.publishing?'…':'')+'</label>'+(repo.publish_error?'<p class="form-message" role="alert">'+E(repo.publish_error)+'</p>':'')+'</div></td></tr>';
     }).join('')+'</tbody></table></div><div id="repository-filter-empty" hidden>'+U.empty('No matching repositories','Choose another category or change the search.')+'</div>':U.empty('No catalogue yet','Connect an account and enable its repositories in Connections.');
     html+='</section>';
     if(jobs.length)html+='<section class="panel"><div class="panel-heading"><h2>Active jobs</h2></div>'+jobRows(jobs)+'</section>';
@@ -70,7 +70,7 @@
     U.status(jobs.some(job=>job.kind==='catalog')?'Refreshing repositories…':'Repositories loaded.');
     applyFilter();
     if(ctx.leaf)await details(ctx.leaf);
-    if(jobs.length)pollOverview(ctx);
+    if(jobs.length||repos.some(repo=>repo.publishing))pollOverview(ctx);
   };
   function applyFilter(){
     const rows=[...document.querySelectorAll('[data-repo-search]')];
@@ -226,6 +226,18 @@
       const dirty=document.querySelector('#release-dirty');if(dirty)dirty.textContent='Unsaved changes';
       const build=document.querySelector('#release-build button[type="submit"]');if(build)build.disabled=true;
     }
+  });
+  document.addEventListener('change',async event=>{
+    const checkbox=event.target;if(!checkbox.matches('[data-repository-publish]'))return;
+    const selected=checkbox.checked;checkbox.disabled=true;
+    try{
+      const repo=await api('items/'+encodeURIComponent(checkbox.dataset.repositoryPublish)+'/publication',{method:'PUT',body:{published:selected}});
+      if(checkbox.isConnected)checkbox.checked=repo.published||repo.publishing;
+      const cached=lastState?.repositories.find(item=>item.name===repo.name);if(cached)Object.assign(cached,{published:repo.published,publishing:repo.publishing});
+      if(repo.publishing)pollOverview(U.current);
+      U.status(repo.publishing?'App publication queued.':selected?'App published. Open Apps → Overview to edit its settings.':'App removed from the Apps overview.');
+    }catch(error){if(checkbox.isConnected)checkbox.checked=!selected;U.status(error.message,true);}
+    finally{if(checkbox.isConnected)checkbox.disabled=false;}
   });
   document.addEventListener('change',event=>{
     if(event.target.id==='repository-category'){category=event.target.value;applyFilter();}
