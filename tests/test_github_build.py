@@ -198,6 +198,19 @@ class GitHubBuildTests(unittest.TestCase):
         self.store.change_job(jobs[0]['id'],status='running',result={'github_release':{'published':True}})
         self.store.recover();self.assertEqual(self.store.job(jobs[0]['id'])['status'],'completed')
 
+    def test_pinned_older_build_cannot_mark_a_new_checkout_as_published(self):
+        self.warm();job=self.enqueue()
+        (self.source/'new-source.txt').write_text('A later local checkout.')
+        self.git('add','.');self.git('commit','-m','New checkout after enqueue')
+        latest=self.git('rev-parse','HEAD')
+        self.store.local('unusual-project',dict(self.local,commit=latest));self.fake.commit=latest
+        worker.once(self.store)
+        finished=self.store.job(job['id']);self.assertEqual(finished['status'],'completed',finished['error'])
+        self.assertEqual(self.fake.tags['v0.1.0'],self.commit)
+        info=github_build.view(self.store,self.store.repository('unusual-project'))
+        self.assertNotEqual(info['state'],'published');self.assertFalse(info['enabled'])
+        self.assertEqual(self.warm()['state'],'conflict')
+
     def test_unknown_github_status_and_dirty_source_never_enable_build(self):
         with patch.object(self.fake,'request',side_effect=GitHubFailure(403,'Denied')):
             self.assertEqual(self.warm()['state'],'unknown')

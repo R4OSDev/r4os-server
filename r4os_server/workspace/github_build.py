@@ -348,5 +348,6 @@ def run(context, name, payload):
         if confirmed['state'] != 'published': raise Conflict('GitHub publication could not be verified. Retry to inspect the existing release.')
         result['github_release'] = dict(confirmed, published=True)
         store.change_job(context.job['id'], result=result)
-        persist(store, repo, connection, {'remote_commit': payload['commit'], 'targets': [dict(confirmed, id=module['id'], version=module['version'])]})
+        if repo['local'].get('commit') == payload['commit']:
+            persist(store, repo, connection, {'remote_commit': payload['commit'], 'targets': [dict(confirmed, id=module['id'], version=module['version'])]})
         return result
