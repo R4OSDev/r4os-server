@@ -20,8 +20,14 @@ def execute(context):
         return connections.remove(context)
     if kind == "app_publish":
         from .apps import publish
-        context.phase("Reading the application manifest")
+        context.phase("Reading the app listing manifest")
         return publish(context.store, subject, {"published": True}, job_id=job['id'], expected_revision=payload['connection_revision'])
+    if kind == "github_status":
+        from .github_build import refresh
+        return refresh(context, subject)
+    if kind == "build_publish":
+        from .github_build import run
+        return run(context, subject, payload)
     if kind == "catalog":
         keys = [payload["connection_id"]] if payload.get("connection_id") else [item["id"] for item in connections.list_connections(context.store) if item["status"] == "ready"]
         results = []
@@ -88,7 +94,8 @@ def once(store):
     try:
         context.phase("Job started")
         result = execute(context) or {}
-        context.check()
+        if not result.get('github_release', {}).get('published'):
+            context.check()
         store.change_job(job["id"], status="completed", phase="Completed", result=result, finished=now())
         context.log("Result: completed")
     except Cancelled as error:

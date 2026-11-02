@@ -52,7 +52,7 @@ def manifest(text):
             raise ValueError('The root module.R4MF requires one '+key+' entry.')
         return values[0]
     if single('R4OS_MODULE_MANIFEST') != '2' or single('KIND') != 'R4X':
-        raise ValueError('Publish requires a root module.R4MF for an R4X application (manifest version 2).')
+        raise ValueError('Show in Apps requires a root module.R4MF for an R4X application (manifest version 2).')
     name, version = single('NAME'), single('VERSION')
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,31}', name):
         raise ValueError('The application manifest NAME is invalid.')
@@ -117,7 +117,7 @@ def record(store, row, repo=None):
 def get(store, name):
     row = existing(store, name)
     if row is None:
-        raise ValueError('Application not found. Enable Publish in Repositories first.')
+        raise ValueError('Application not found. Enable Show in Apps in Repositories first.')
     return record(store, row)
 
 
@@ -140,7 +140,7 @@ def check_connection(db, name, connection_id, revision):
 def request_publish(store, name, value):
     """Keep GitHub network access in the existing Internet-enabled worker."""
     if not isinstance(value, dict) or set(value) != {'published'} or type(value['published']) is not bool:
-        raise ValueError('Publish requires a published boolean.')
+        raise ValueError('Show in Apps requires a published boolean.')
     repo = store.repository(name)
     if not value['published']:
         with store.connect() as db:
@@ -159,7 +159,7 @@ def request_publish(store, name, value):
 
 def publish(store, name, value, *, job_id=None, expected_revision=None):
     if not isinstance(value, dict) or set(value) != {'published'} or type(value['published']) is not bool:
-        raise ValueError('Publish requires a published boolean.')
+        raise ValueError('Show in Apps requires a published boolean.')
     repo = store.repository(name)
     connection = connections.get(store, repo['connection_id'])
     if expected_revision is not None and connection['revision'] != expected_revision:
@@ -178,7 +178,7 @@ def publish(store, name, value, *, job_id=None, expected_revision=None):
             job = db.execute('SELECT cancel,status FROM jobs WHERE id=?', (job_id,)).fetchone()
             if not job or job['cancel'] or job['status'] != 'running':
                 from .process import Cancelled
-                raise Cancelled('App publication was cancelled.')
+                raise Cancelled('Adding the app was cancelled.')
         if selected and not current['enabled']:
             raise Conflict('This repository was disabled. Refresh the page and try again.')
         if source:

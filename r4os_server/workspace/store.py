@@ -80,6 +80,8 @@ class Store:
             initialize_metadata(db)
             from .apps import initialize as initialize_apps
             initialize_apps(db)
+            from .github_build import initialize as initialize_github_builds
+            initialize_github_builds(db)
             columns = {row["name"] for row in db.execute("PRAGMA table_info(release_types)")}
             migrate_tests = "test_configuration" not in columns
             if migrate_tests:
@@ -120,6 +122,7 @@ class Store:
     def repository_record(row):
         from .profiles import english_cache
         value = json.loads(row["metadata"])
+        value.setdefault("id", row["github_id"])
         value.setdefault("display_name", value["name"])
         url = urlsplit(value.get("url", ""))
         value.setdefault("owner", url.path.strip("/").split("/")[0] if url.hostname == "github.com" else "")
@@ -223,7 +226,7 @@ class Store:
                     raise Conflict("This connection is being deleted. New jobs cannot use its repositories.")
         query = "SELECT * FROM jobs WHERE kind=? AND subject=? AND status IN ('queued','running')"
         arguments = [kind, subject]
-        if kind == "app_publish":
+        if kind in ("app_publish", "github_status", "build_publish"):
             query += " AND cancel=0"
         if kind in ("catalog", "download_all", "update_all", "check"):
             query += " AND COALESCE(json_extract(payload,'$.connection_id'),'')=?"
@@ -296,7 +299,7 @@ class Store:
             clauses.append("subject=?")
             args.append(subject)
         categories = {"all": "", "repositories": "kind IN ('catalog','download','update','download_all','update_all','check','connection_delete')",
-                      "tools": "kind GLOB 'tools_*'", "builds": "kind='build'", "releases": "kind='release'"}
+                      "tools": "kind GLOB 'tools_*'", "builds": "kind IN ('build','build_publish')", "releases": "kind='release'"}
         if category not in categories:
             raise ValueError("Unknown log category.")
         if categories[category]:
@@ -354,5 +357,6 @@ class Store:
 
     def recover(self):
         with self.connect() as db:
+            db.execute("UPDATE jobs SET status='completed',finished=?,phase='Completed' WHERE status='running' AND kind='build_publish' AND json_extract(result,'$.github_release.published')=1", (now(),))
             db.execute("UPDATE jobs SET status='interrupted',finished=?,error=? WHERE status='running'",
                        (now(), "The worker stopped. The job can be started again."))

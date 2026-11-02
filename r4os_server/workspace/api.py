@@ -7,7 +7,7 @@ import time
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from ..common.http import HTTPError
-from . import releases, testconfigs, connections, repo_metadata, apps
+from . import releases, testconfigs, connections, repo_metadata, apps, github_build
 from .store import ACTIVE, identifier, under, update_candidate
 
 
@@ -88,6 +88,8 @@ def dispatch(handler):
         if parts == ["state"] and read:
             worker = store.setting("worker", {})
             repositories = store.repositories()
+            for repo in repositories:
+                repo['build_release'] = github_build.view(store, repo, schedule=True)
             return handler.json(200, {"repositories": repositories, "catalog": store.setting("catalog", {}),
                                       "categories": repo_metadata.CATEGORIES, "update_count": sum(bool(update_candidate(repo)) for repo in repositories),
                                       "worker": dict(worker, ready=time.time() - worker.get("heartbeat", 0) < 20),
@@ -97,6 +99,10 @@ def dispatch(handler):
         if len(parts) == 3 and parts[0] == "items" and parts[2] == "publication" and method == "PUT":
             status, result = apps.request_publish(store, parts[1], data(handler))
             return handler.json(status, result)
+        if len(parts) == 3 and parts[0] == 'items' and parts[2] == 'build' and read:
+            return handler.json(200, github_build.view(store, store.repository(parts[1]), schedule=True))
+        if parts == ['build-publish'] and method == 'POST':
+            return handler.json(202, github_build.enqueue(store, data(handler)))
         if len(parts) == 2 and parts[0] == "items" and read:
             repo = store.repository(parts[1])
             tools = None
@@ -123,6 +129,12 @@ def dispatch(handler):
             if scope:
                 if connections.get(store, scope)["status"] != "ready":
                     raise ValueError("This connection is being deleted.")
+            if kind == 'catalog':
+                with store.connect() as db:
+                    if scope:
+                        db.execute('DELETE FROM github_release_status WHERE repository_name IN (SELECT name FROM repositories WHERE connection_id=?)', (scope,))
+                    else:
+                        db.execute('DELETE FROM github_release_status')
             return handler.json(202, store.enqueue(kind, name, {"connection_id": scope} if scope else {}))
         if parts == ["jobs"] and read:
             query = parse_qs(url.query)
@@ -151,7 +163,8 @@ def dispatch(handler):
                 return handler.json(200, {"text": text, "offset": offset, "status": job["status"]})
             if len(parts) == 4 and parts[2] == "files" and read:
                 matches = [item for item in job["result"].get("files", []) if item["id"] == parts[3]]
-                if not matches or job["status"] != "completed":
+                retained_build = job['kind'] == 'build_publish' and bool(job['result'].get('local_build'))
+                if not matches or (job["status"] != "completed" and not retained_build):
                     raise HTTPError(404, "output_not_found")
                 item = matches[0]
                 if item["path"].split("/", 1)[0] not in ("Artifacts", "Release"):

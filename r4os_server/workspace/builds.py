@@ -15,13 +15,13 @@ from .process import clean_env
 from .store import identifier, now, under
 from .toolsets import active, clone_snapshot, digest, write_json
 
-ROLES = {"r4os-app-": "Apps", "r4os-service-": "Services", "r4os-diagnostic-": "Diagnostics",
+ROLES = {"r4os-app-": "Apps", "r4os-games-": "Apps", "r4os-service-": "Services", "r4os-diagnostic-": "Diagnostics",
          "r4os-driver-": "Drivers", "r4os-protocol-": "Protocols", "r4os-subsystem-": "Subsystems"}
 CENTRAL = {"r4os-kernel": "Kernel", "r4os-sdk": "SDK", "r4os-contract": "Contract",
            "r4os-libraries": "Libraries", "r4os-distribution": "Distribution", "r4os-recovery": "Recovery"}
 
 
-def enqueue(store, value):
+def inputs(store, value):
     repo = store.require_repository(value.get("name", ""))
     local = repo["local"]
     target = value.get("target")
@@ -41,15 +41,24 @@ def enqueue(store, value):
             raise ValueError(name + ": required as a clean local source import. Download it or check its status first.")
         sources[source["name"]] = source["local"]["commit"]
         module["source_ids"][name] = source["name"]
-    return store.enqueue("build", repo["name"], {"target": target, "module": module, "commit": local["commit"], "toolset": tools["id"], "source_dependencies": sources})
+    return repo, {"target": target, "module": module, "commit": local["commit"], "toolset": tools["id"], "source_dependencies": sources}
 
 
-def owner_relative(name):
+def enqueue(store, value):
+    repo, payload = inputs(store, value)
+    return store.enqueue("build", repo["name"], payload)
+
+
+def owner_relative(name, module=None, identity=None):
+    if identity and identity != name:
+        return Path('Projects') / identifier(identity)
     if name in CENTRAL:
         return Path(CENTRAL[name])
     for prefix, role in ROLES.items():
         if name.startswith(prefix):
             return Path(role) / name.removeprefix(prefix)
+    if module and module.get('manifest') and module.get('kind') in ('R4X', 'R4L', 'R4D', 'R4P'):
+        return Path('Projects') / identifier(identity or name)
     raise ValueError("No owner build adapter is available for this repository.")
 
 
@@ -187,16 +196,18 @@ def module_build(context, root, owner, module, tools, output):
     action = "metadata"
     if not catalog_exe.is_file():
         catalog_exe, action = tools / "HostTools/bin/x86_64-unknown-linux-gnu/module-catalog", "plan"
+        if not catalog_exe.is_file():
+            catalog_exe = tools / "HostTools/bin/module-catalog"
     facts, _ = context.run([catalog_exe, action, "--manifest", owner / module["manifest"]], quiet=True)
     plan = json.loads(facts)
-    if module["language"] == "Rust":
+    if module["language"] == "Rust" or not any((folder / "build.zig").is_file() for folder in (module_root, owner)):
         cargo = module_root / "Cargo.toml"
         needs_helpers = cargo.is_file() and "r4os-library-helpers" in cargo.read_text()
         if needs_helpers:
             prepare_library_bindings(context, root, tools)
         context.run(["pwsh", "-NoLogo", "-NoProfile", "-File", sdk / "Tools/Build-Project.ps1",
                      "-ProjectRoot", module_root, "-SdkRoot", sdk, "-ContractRoot", contract, "-ToolsRoot", tools / "HostTools",
-                     "-InstallRoot", tools / "DevKit", "-CacheRoot", context.store.root / "BuildTools/Cache/Rust-Build",
+                     "-InstallRoot", tools / "DevKit", "-CacheRoot", context.store.root / ("BuildTools/Cache/Rust-Build" if module["language"] == "Rust" else "BuildTools/Cache/Manifest-Build"),
                      "-OutputRoot", output, *(["-LibraryHelpersRoot", libraries] if needs_helpers else []), "-ZigRoot", zig.parent], timeout=3600)
     else:
         if not (module_root / "build.zig").is_file() and (owner / "build.zig").is_file():
@@ -266,15 +277,19 @@ def build(context, name, payload):
         raise ValueError("The selected toolset is not ready.")
     local = catalog.inspect(context, name, remote=False)
     modules = [item for item in local.get("modules", []) if item["id"] == payload["target"]]
-    if not modules:
+    if not modules and not payload.get('module'):
         raise ValueError("The build target is no longer available.")
-    module = payload.get("module", modules[0])
+    module = payload.get("module") or modules[0]
     root = workspace(context, tools, context.job["id"])
-    owner = root / "Repositories" / owner_relative(store.repository(name)["display_name"])
+    owner = root / "Repositories" / owner_relative(store.repository(name)["display_name"], module, name)
     if owner.is_symlink():
         owner.unlink()
     context.phase("Preparing source snapshot for " + name)
     snapshot(context, name, payload["commit"], owner)
+    if payload.get('github_release') and module.get('manifest'):
+        values = fields(owner / module['manifest'])
+        if any(values.get(key) != [expected] for key, expected in (('NAME', module['id']), ('KIND', module['kind']), ('VERSION', module['version']))):
+            raise ValueError('The source snapshot differs from the queued release manifest.')
     output = root / "Output"
     configure_owner(root, owner, tools, output)
     prepare_source_dependencies(context, root, owner, module, tools, payload.get("source_dependencies", {}))

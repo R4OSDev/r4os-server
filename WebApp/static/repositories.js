@@ -5,7 +5,7 @@
   let filter='',category='',account='',lastState=null,dialogJob=null,dialogOffset=0,dialogText='',dialogGeneration=0,dialogTrigger=null;
   const active=job=>['queued','running'].includes(job.status);
   const status=value=>'<span class="badge">'+E(states[value]||value||'Unknown')+'</span>';
-  const button=(label,action,name='',disabled=false,primary=false)=>'<button type="button" class="button '+(primary?'primary':'subtle')+'" data-repo-action="'+E(action)+'" data-name="'+E(name)+'"'+(disabled?' disabled':'')+'>'+E(label)+'</button>';
+  const button=(label,action,name='',disabled=false,primary=false,title='')=>'<button type="button" class="button '+(primary?'primary':'subtle')+'" data-repo-action="'+E(action)+'" data-name="'+E(name)+'"'+(disabled?' disabled':'')+(title?' title="'+E(title)+'"':'')+'>'+E(label)+'</button>';
   async function refreshPage(ctx){
     const focused=document.activeElement,content=document.querySelector('#content-area'),scroll=content?.scrollTop||0;
     let selector=focused?.id?'#'+CSS.escape(focused.id):focused?.dataset.repoAction?'[data-repo-action="'+CSS.escape(focused.dataset.repoAction)+'"][data-name="'+CSS.escape(focused.dataset.name||'')+'"]':null;
@@ -58,7 +58,7 @@
       const local=repo.local||{},busy=jobs.some(job=>job.subject===repo.name||job.kind.endsWith('_all'));
       const classification=repo.server_metadata?.category||'Undefined';
       const sourceAction=local.status==='outdated'?button('Update','update',repo.name,busy||!repo.available||local.dirty,true):button(local.commit||local.status==='empty'?'Downloaded':'Download','download',repo.name,busy||!!local.commit||local.status==='empty'||!repo.available);
-      return '<tr class="repository-entry" data-repo-search="'+E(((repo.display_name||repo.name)+' '+(repo.owner||'')+' '+repo.description).toLowerCase())+'" data-category="'+E(classification)+'" data-account="'+E((repo.owner||'').toLowerCase())+'"><td class="repository-description"><button class="repository-name" data-repo-action="details" data-name="'+E(repo.name)+'">'+E(repo.display_name||repo.name)+'</button>'+(repo.description?'<p class="muted">'+E(repo.description)+'</p>':'')+'<div class="repository-labels"><span class="badge">'+(repo.private?'Private':'Public')+'</span>'+(repo.archived?'<span class="badge">Archived</span>':'')+'</div>'+(!repo.available?'<p class="muted">'+E(repo.unavailable_reason)+'</p>':'')+'</td><td class="repository-category-cell"><span class="badge">'+E(classification)+'</span></td><td class="repository-local" data-local-status="'+E(!repo.available?'unavailable':local.status||'missing')+'">'+status(!repo.available?'Access unavailable':local.status||'missing')+(local.commit?'<p><code>'+E(local.commit.slice(0,12))+'</code> · '+E(local.branch||'')+'</p>':'')+'</td><td class="repository-actions-cell"><span class="repository-owner">'+E(repo.owner||'')+'</span><div class="repo-row-actions">'+sourceAction+button('Edit','edit',repo.name)+'<label class="repository-publish"><input type="checkbox" data-repository-publish="'+E(repo.name)+'" aria-label="Publish '+E(repo.display_name||repo.name)+'"'+(repo.published||repo.publishing?' checked':'')+((busy&&!repo.publishing)||(!repo.available&&!repo.published&&!repo.publishing)?' disabled':'')+'>Publish'+(repo.publishing?'…':'')+'</label>'+(repo.publish_error?'<p class="form-message" role="alert">'+E(repo.publish_error)+'</p>':'')+'</div></td></tr>';
+      return '<tr class="repository-entry" data-repo-search="'+E(((repo.display_name||repo.name)+' '+(repo.owner||'')+' '+repo.description).toLowerCase())+'" data-category="'+E(classification)+'" data-account="'+E((repo.owner||'').toLowerCase())+'"><td class="repository-description"><button class="repository-name" data-repo-action="details" data-name="'+E(repo.name)+'">'+E(repo.display_name||repo.name)+'</button>'+(repo.description?'<p class="muted">'+E(repo.description)+'</p>':'')+'<div class="repository-labels"><span class="badge">'+(repo.private?'Private':'Public')+'</span>'+(repo.archived?'<span class="badge">Archived</span>':'')+'</div>'+(!repo.available?'<p class="muted">'+E(repo.unavailable_reason)+'</p>':'')+'</td><td class="repository-category-cell"><span class="badge">'+E(classification)+'</span></td><td class="repository-local" data-local-status="'+E(!repo.available?'unavailable':local.status||'missing')+'">'+status(!repo.available?'Access unavailable':local.status||'missing')+(local.commit?'<p><code>'+E(local.commit.slice(0,12))+'</code> · '+E(local.branch||'')+'</p>':'')+'</td><td class="repository-actions-cell"><span class="repository-owner">'+E(repo.owner||'')+'</span><div class="repo-row-actions">'+sourceAction+button('Build','build_publish',repo.name,!repo.build_release?.enabled||busy,false,repo.build_release?.reason||'Checking build readiness…')+button('Edit','edit',repo.name)+'<label class="repository-publish"><input type="checkbox" data-repository-publish="'+E(repo.name)+'" title="Show in Apps" aria-label="Show in Apps '+E(repo.display_name||repo.name)+'"'+(repo.published||repo.publishing?' checked':'')+((busy&&!repo.publishing)||(!repo.available&&!repo.published&&!repo.publishing)?' disabled':'')+'>Show in Apps'+(repo.publishing?'…':'')+'</label>'+(repo.publish_error?'<p class="form-message" role="alert">'+E(repo.publish_error)+'</p>':'')+'</div></td></tr>';
     }).join('')+'</tbody></table></div><div id="repository-filter-empty" hidden>'+U.empty('No matching repositories','Choose another category or change the search.')+'</div>':U.empty('No catalogue yet','Connect an account and enable its repositories in Connections.');
     html+='</section>';
     if(jobs.length)html+='<section class="panel"><div class="panel-heading"><h2>Active jobs</h2></div>'+jobRows(jobs)+'</section>';
@@ -70,7 +70,7 @@
     U.status(jobs.some(job=>job.kind==='catalog')?'Refreshing repositories…':'Repositories loaded.');
     applyFilter();
     if(ctx.leaf)await details(ctx.leaf);
-    if(jobs.length||repos.some(repo=>repo.publishing))pollOverview(ctx);
+    if(jobs.length||repos.some(repo=>repo.publishing||repo.build_release?.checking))pollOverview(ctx);
   };
   function applyFilter(){
     const rows=[...document.querySelectorAll('[data-repo-search]')];
@@ -78,6 +78,17 @@
     const matches=rows.some(row=>!row.hidden),table=document.querySelector('.repository-table');
     if(table)table.hidden=!matches;
     const empty=document.querySelector('#repository-filter-empty');if(empty)empty.hidden=matches;
+  }
+  async function openBuild(name){
+    const generation=U.generation,value=await api('items/'+encodeURIComponent(name)+'/build');
+    if(generation!==U.generation)return;
+    if(!value.enabled)throw new Error(value.reason);
+    if(value.targets.length===1){
+      const job=await api('build-publish',{method:'POST',body:{name,target:value.targets[0].id}});
+      await showJob(job.id);return;
+    }
+    const selected=value.targets.find(item=>item.enabled);
+    U.open('Build and publish on GitHub','<form id="repository-build-publish" data-name="'+E(name)+'"><p class="muted">Build a pinned source revision and upload the resulting artifacts to GitHub Releases.</p><label>Build target<select name="target">'+value.targets.map(item=>'<option value="'+E(item.id)+'" data-version="'+E(item.version)+'"'+(!item.enabled?' disabled':'')+(item.id===selected.id?' selected':'')+'>'+E(item.name+' · '+item.kind+' · v'+item.version+(item.state==='published'?' · Already published':''))+'</option>').join('')+'</select></label><p class="muted">The release tag is taken from the selected target’s manifest version.</p><div class="form-actions"><button type="submit" class="button primary">Build</button><button type="button" class="button subtle" data-action="close-dialog">Cancel</button></div><p class="form-message" role="alert"></p></form>');
   }
   async function editRepository(name){
     const {repository:repo}=await api('items/'+encodeURIComponent(name));
@@ -96,7 +107,7 @@
     html+='<div class="form-actions">'+button('Download','download',repo.name,!!local.commit||local.status==='empty'||!repo.available)+button('Check status','check',repo.name,!local.commit||!repo.available)+(local.status==='outdated'?button('Update','update',repo.name,!repo.available):'')+'</div>';
     if((local.modules||[]).length){
       const available=repo.available&&!!value.toolset&&!local.dirty&&!value.jobs.some(job=>active(job)&&job.kind==='build');
-      html+='<h3>Build targets</h3><form id="repository-build" data-name="'+E(repo.name)+'" data-available="'+available+'"><label>Project target<select name="target">'+local.modules.map(module=>'<option value="'+E(module.id)+'" data-reason="'+E(module.reason||'')+'"'+(module.supported===false?' disabled':'')+'>'+E(module.name+' · '+module.kind+' · '+module.language+(module.version?' · '+module.version:''))+'</option>').join('')+'</select></label><p class="muted">'+(value.toolset?'Active toolset: '+E(value.toolset):'Set up the build tools first.')+' · <a href="#repositories/tools" data-close-repo-dialog>Open Tools</a></p>'+(local.dirty?'<p class="workspace-notice">Local changes detected. A build requires a clean source revision.</p>':'')+(local.profile?.errors?.length?'<p class="workspace-notice">'+local.profile.errors.map(E).join('<br>')+'</p>':'')+'<button type="submit" class="button primary"'+(!available||local.modules.every(module=>module.supported===false)?' disabled':'')+'>Build</button><p class="form-message" role="alert"></p></form>';
+      html+='<h3>Build targets</h3><form id="repository-build" data-name="'+E(repo.name)+'" data-available="'+available+'"><label>Project target<select name="target">'+local.modules.map(module=>'<option value="'+E(module.id)+'" data-reason="'+E(module.reason||'')+'"'+(module.supported===false?' disabled':'')+'>'+E(module.name+' · '+module.kind+' · '+module.language+(module.version?' · '+module.version:''))+'</option>').join('')+'</select></label><p class="muted">'+(value.toolset?'Active toolset: '+E(value.toolset):'Set up the build tools first.')+' · <a href="#repositories/tools" data-close-repo-dialog>Open Tools</a></p>'+(local.dirty?'<p class="workspace-notice">Local changes detected. A build requires a clean source revision.</p>':'')+(local.profile?.errors?.length?'<p class="workspace-notice">'+local.profile.errors.map(E).join('<br>')+'</p>':'')+'<button type="submit" class="button primary"'+(!available||local.modules.every(module=>module.supported===false)?' disabled':'')+'>Build locally</button><p class="form-message" role="alert"></p></form>';
       if(value.build_tools)html+=U.fold('SDKs and tools used',{compiler:value.build_tools.versions,sources:value.build_tools.sources});
       html+=U.fold('Discovered build profiles',local.modules);
     }else html+='<p class="muted">'+E(local.profile?.reason||'Build targets are discovered after downloading.')+'</p>';
@@ -114,7 +125,7 @@
     dialogOffset=log.offset;dialogText=(dialogText+log.text).slice(-250000);
     const summary=job.result.repositories?'<p>'+(job.kind==='update_all'?U.count(job.result.target_count??job.payload.targets?.length??0)+' update targets · ':'')+U.count(job.result.repositories.filter(item=>item.status!=='failed'&&item.status!=='skipped').length)+' successful · '+U.count(job.result.repositories.filter(item=>item.status==='skipped').length)+' skipped · '+U.count(job.result.failed||0)+' failed</p>'+U.fold('Individual results',job.result.repositories):'';
     const testInfo=job.kind==='release'&&'test_configuration' in (job.payload||{})?'<p class="muted">Test configuration: '+E(job.payload.test_configuration?job.payload.test_configuration.name+' · Revision '+job.payload.test_configuration.revision:'None')+'</p>':'';
-    const html='<div class="detail-status">'+status(job.status)+'<span>'+E(job.phase)+'</span>'+(active(job)?button('Cancel','cancel',id):'')+'</div>'+testInfo+(job.error?'<p class="workspace-notice">'+E(job.error)+'</p>':'')+summary+files(job)+'<pre class="build-log" tabindex="0">'+E(dialogText||'Job waiting for the worker …')+'</pre>';
+    const html='<div class="detail-status">'+status(job.status)+'<span>'+E(job.phase)+'</span>'+(active(job)?button('Cancel','cancel',id):'')+'</div>'+testInfo+(job.result.github_release?.published?'<p><a class="artifact-link" href="'+E(job.result.github_release.release_url)+'" target="_blank" rel="noopener noreferrer">Open GitHub release '+E(job.result.github_release.tag)+'</a></p>':job.result.local_build?'<p class="workspace-notice">Local artifacts are available. GitHub publication is not complete; start Build again to retry the upload.</p>':'')+(job.error?'<p class="workspace-notice">'+E(job.error)+'</p>':'')+summary+files(job)+'<pre class="build-log" tabindex="0">'+E(dialogText||'Job waiting for the worker …')+'</pre>';
     const dialog=document.querySelector('#detail-dialog'),oldLog=dialog?.querySelector('.build-log');
     const oldScroll=oldLog?.scrollTop||0,atBottom=!oldLog||oldLog.scrollHeight-oldLog.clientHeight-oldScroll<20;
     const focused=document.activeElement,focusLog=focused===oldLog,focusCancel=focused?.dataset.repoAction==='cancel';
@@ -235,7 +246,7 @@
       if(checkbox.isConnected)checkbox.checked=repo.published||repo.publishing;
       const cached=lastState?.repositories.find(item=>item.name===repo.name);if(cached)Object.assign(cached,{published:repo.published,publishing:repo.publishing});
       if(repo.publishing)pollOverview(U.current);
-      U.status(repo.publishing?'App publication queued.':selected?'App published. Open Apps → Overview to edit its settings.':'App removed from the Apps overview.');
+      U.status(repo.publishing?'Adding app to the list…':selected?'App listed. Open Apps → Overview to edit its settings.':'App removed from the Apps overview.');
     }catch(error){if(checkbox.isConnected)checkbox.checked=!selected;U.status(error.message,true);}
     finally{if(checkbox.isConnected)checkbox.disabled=false;}
   });
@@ -261,6 +272,7 @@
         if(location.hash===hash)await U.navigate();else location.hash=hash;
         U.status(label+' deleted.');return;
       }
+      if(action==='build_publish'){await openBuild(name);return;}
       if(action==='details'){await details(name);return;}
       if(action==='edit'){await editRepository(name);return;}
       if(action==='job'){await showJob(name);return;}
@@ -286,11 +298,12 @@
       }catch(error){form.querySelector('.form-message').textContent=error.message;submit.disabled=false;}
       return;
     }
-    const form=event.target;if(!['repository-build','release-new','release-edit','release-build','test-configuration'].includes(form.id))return;
+    const form=event.target;if(!['repository-build','repository-build-publish','release-new','release-edit','release-build','test-configuration'].includes(form.id))return;
     event.preventDefault();const submit=form.querySelector('[type="submit"]');submit.disabled=true;
     try{
       const values=new FormData(form);let result;
-      if(form.id==='repository-build')result=await api('build',{method:'POST',body:{name:form.dataset.name,target:values.get('target')}});
+      if(form.id==='repository-build-publish')result=await api('build-publish',{method:'POST',body:{name:form.dataset.name,target:values.get('target')}});
+      else if(form.id==='repository-build')result=await api('build',{method:'POST',body:{name:form.dataset.name,target:values.get('target')}});
       else if(form.id==='release-new'){
         const template=values.get('template');
         result=await api('releases',{method:'POST',body:{name:values.get('name'),template:template||undefined,test_configuration:null}});

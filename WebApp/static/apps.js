@@ -11,7 +11,7 @@
       E(app.owner)+'<small class="cell-subline">'+E(app.repository_name)+'</small>'+(app.private?'<span class="badge">Private</span>':'')+(!app.source_available?'<p class="muted">'+E(app.source_error||'Source unavailable')+'</p>':''),
       '<button type="button" class="button subtle" data-edit-app="'+E(app.repository)+'" aria-label="Edit '+E(app.display_name)+'">Edit</button>'
     ]);
-    const html=rows.length?'<section class="panel apps-list" aria-label="Apps overview">'+U.table(['App','Install-Path','Source','Actions'],rows)+'</section>':value.publishing?U.empty('Publishing apps','Apps appear here after their manifests have been read.'):U.empty('No published apps','Enable Publish for an application in Repositories → Overview.');
+    const html=rows.length?'<section class="panel apps-list" aria-label="Apps overview">'+U.table(['App','Install-Path','Source','Actions'],rows)+'</section>':value.publishing?U.empty('Adding apps','Apps appear here after their manifests have been read.'):U.empty('No apps listed','Enable Show in Apps for an application in Repositories → Overview.');
     U.page(ctx,'Apps','',html);U.status('Apps loaded.');
     if(value.publishing)poll(ctx);
   };
