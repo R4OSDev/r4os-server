@@ -138,6 +138,19 @@ class AppTests(unittest.TestCase):
             self.assertTrue(worker.once(self.store))
         self.assertFalse(apps.get(self.store, 'queued-game')['published'])
         self.assertFalse(self.store.repository('queued-game')['publishing'])
+        apps.request_publish(self.store, 'queued-game', {'published': True})
+        def cancel_and_republish(*args):
+            apps.request_publish(self.store, 'queued-game', {'published': False})
+            status, queued = apps.request_publish(self.store, 'queued-game', {'published': True})
+            self.assertEqual(status, 202)
+            self.assertTrue(queued['publishing'])
+            return document, {}
+        with patch.object(catalog, 'public_json', side_effect=cancel_and_republish):
+            self.assertTrue(worker.once(self.store))
+        self.assertFalse(apps.get(self.store, 'queued-game')['published'])
+        with patch.object(catalog, 'public_json', return_value=(document, {})):
+            self.assertTrue(worker.once(self.store))
+        self.assertTrue(apps.get(self.store, 'queued-game')['published'])
 
     def test_source_failure_keeps_manual_values_and_recovers(self):
         apps.publish(self.store, 'minesweeper', {'published': True})

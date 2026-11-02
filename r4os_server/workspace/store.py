@@ -223,6 +223,8 @@ class Store:
                     raise Conflict("This connection is being deleted. New jobs cannot use its repositories.")
         query = "SELECT * FROM jobs WHERE kind=? AND subject=? AND status IN ('queued','running')"
         arguments = [kind, subject]
+        if kind == "app_publish":
+            query += " AND cancel=0"
         if kind in ("catalog", "download_all", "update_all", "check"):
             query += " AND COALESCE(json_extract(payload,'$.connection_id'),'')=?"
             arguments.append(payload.get("connection_id") or "")
