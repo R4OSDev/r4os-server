@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import tarfile
 import tempfile
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -66,12 +67,24 @@ class SDKTests(unittest.TestCase):
         job=self.store.enqueue('build','old-source',{'toolset':'legacy'});self.store.change_job(job['id'],status='completed',result={'historical':True})
         old=self.store.root/'BuildTools/Workspaces'/job['id'];old.mkdir(parents=True);(old/'old-source').write_text('obsolete')
         recovery=sdk_packages.root(self.store,'sdk-fixture')/'Content/RECOVERY';recovery.mkdir(parents=True);(recovery/'frozen').write_text('current SDK component')
+        retired=self.store.root/'Repositories/Main/r4os-devkit';retired.mkdir(parents=True)
+        subprocess.run(['git','init',str(retired)],check=True,capture_output=True)
+        with self.store.connect() as db:db.execute('INSERT INTO repositories(name,github_id,metadata,directory,enabled) VALUES(?,?,?,?,0)',('r4os-devkit',91,json.dumps({'id':91,'name':'r4os-devkit','display_name':'r4os-devkit','owner':'R4OSDev'}),'Main/r4os-devkit'))
         artifact=self.store.root/'Artifacts/saved.bin';artifact.parent.mkdir(exist_ok=True);artifact.write_bytes(b'user artifact')
         with patch.object(toolsets,'validate',return_value={'ready':True}):result=sdk_cleanup.cleanup(self.context)
         self.assertIn('0.64.100',result['obsolete_sdk_versions']);self.assertFalse(legacy.exists());self.assertFalse(old.exists())
+        self.assertFalse(retired.exists());self.assertFalse(self.store.repository('r4os-devkit')['enabled'])
         self.assertTrue((recovery/'frozen').is_file());self.assertEqual(artifact.read_bytes(),b'user artifact')
         self.assertEqual(self.store.job(job['id'])['result'],{'historical':True})
         self.assertEqual(toolsets.active(self.store)[1]['sdk_id'],'sdk-fixture')
+
+    def test_zig_catalog_null_rust_section_uses_offered_sdk_profile(self):
+        from r4os_server.workspace import profiles
+        discovered={'modules':[{'id':'EXAMPLE','name':'EXAMPLE','kind':'R4X','language':'Zig','manifest':'module.R4MF'}],'profile':{'errors':[]}}
+        plan={'plan':{'kind':'R4X','name':'EXAMPLE','language':'Zig','rust_project':None}}
+        with patch.object(toolsets,'prepare_metadata_parser',return_value=Path('/not-executed')),patch.object(self.context,'run',return_value=(json.dumps(plan),0)):
+            result=profiles.validate(self.context,Path(self.temp.name),discovered)
+        self.assertTrue(result['modules'][0]['supported']);self.assertEqual(result['modules'][0]['sdk_profile']['profile'],'r4os-zig-module-v1')
 
     def test_verified_repeat_reuses_immutable_package_offline(self):
         with patch.object(sdk_packages,'verify',return_value={'verified':True}) as verify,patch.object(sdk_packages,'fetch',side_effect=AssertionError('network used')):

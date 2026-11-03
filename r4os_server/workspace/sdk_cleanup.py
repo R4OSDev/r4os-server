@@ -25,15 +25,17 @@ def inventory(store):
         if directory.is_dir():paths.append(directory)
     with store.connect() as db:
         jobs={row['id']:json.loads(row['payload']) for row in db.execute('SELECT id,payload FROM jobs')}
-    for folder in sorted((root/'Workspaces').iterdir()):
+    for folder in sorted((root/'Workspaces').glob('*')):
         payload=jobs.get(folder.name)
         source=folder/'Repositories/SDK/build.zig.zon'
         version=None
-        if source.is_file():
-            match=re.search(r'\.version\s*=\s*"([^"]+)"',source.read_text())
-            version=match[1] if match else None
+        try:
+            if source.is_file():
+                match=re.search(r'\.version\s*=\s*"([^"]+)"',source.read_text())
+                version=match[1] if match else None
+        except OSError:pass  # An operator-private/unknown workspace is not implicitly disposable.
         if folder.is_dir() and ((payload is not None and not payload.get('sdk_id')) or version in obsolete_versions):paths.append(folder)
-    for repo in store.repositories():
+    for repo in store.repositories(enabled_only=False):
         if repo['connection_id']=='main' and repo['display_name']=='r4os-devkit':
             path=store.root/'Repositories'/repo['directory']
             if path.is_dir():paths.append(path);retired_repositories.append(repo['name'])
@@ -54,7 +56,7 @@ def cleanup(context):
     if pending:raise Conflict('Finish or cancel other SDK/build/source jobs before removing old installations.')
     report=inventory(store)
     for name in report['retired_repositories']:
-        repo=store.require_repository(name);path=store.root/'Repositories'/repo['directory']
+        repo=store.repository(name);path=store.root/'Repositories'/repo['directory']
         dirty,_=context.git(path,'status','--porcelain=v1','--untracked-files=normal')
         if dirty.strip():raise Conflict('The retired DevKit checkout contains local changes; preserve them before cleanup.')
     # Ensure the new environment does not link back into an installation to delete.

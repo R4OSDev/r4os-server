@@ -82,7 +82,7 @@ def validate(context, root, discovered):
                 plan = json.loads(text)['plan']
                 for key in ('kind','name','language'):
                     if module[key] != plan[key]: raise ValueError('Manifest differs from the SDK plan: '+key)
-                profile = plan.get('rust_project', {}).get('profile')
+                profile = (plan.get('rust_project') or {}).get('profile')
                 if not profile:
                     choices = [key for key,value in package['manifest']['profiles'].items()
                                if value['role'] == 'module' and value['language'] == module['language']]

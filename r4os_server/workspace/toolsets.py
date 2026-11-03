@@ -139,10 +139,12 @@ def overview(store):
     if selected:
         metadata = sdk_packages.get(store, selected['id'])
         for name, tool in metadata['manifest']['tools'].items():
-            version = tool.get('version') or tool.get('rust_version')
+            variant=tool.get('hosts',{}).get(platform.system(),{})
+            version = tool.get('version') or tool.get('rust_version') or variant.get('version')
+            if not version:version=', '.join(key+' '+str(tool[key]) for key in ('clang','rustc','python','meson','ninja') if key in tool)
             components.append({'id':name,'name':name,'required':version or 'SDK-defined host requirements',
                                'installed':(current or {}).get('versions',{}).get(name),
-                               'state':'Ready' if name in (current or {}).get('installed_tools',[]) else 'Available from SDK',
+                               'state':'Ready' if name in (current or {}).get('installed_tools',[]) else 'SDK setup available' if name in ('zig','rust','limine','qemu') else 'Owner check required',
                                'path':str(store.root/'BuildTools/Toolsets'/key/'Install') if current else '', 'host':False})
     return {'active':current['id'] if current else None, 'sdk':selected, 'packages':packages, 'toolsets':sets,
             'components':components, 'host':platform.system()+' '+platform.machine(),
@@ -155,6 +157,7 @@ def validate(context, path, manifest):
     context.phase('Checking SDK-owned tools and exact source bindings')
     sdk_packages.verify(context, package['id'])
     run_setup(context, package['id'], path/'Install', manifest['installed_tools'], check=True)
+    sdk_packages.publish_index(context.store)
     return {'ready':True,'toolset':manifest['id'],'sdk_profile':sdk_packages.provenance(package)}
 
 

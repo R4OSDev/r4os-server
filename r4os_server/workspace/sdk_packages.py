@@ -74,7 +74,10 @@ def summary(item):
             'source': manifest['sdk_source'], 'profile_sources': manifest['profile_sources'],
             'profiles': manifest['profiles'], 'toolsets': manifest['toolsets'], 'component_sets': manifest['component_sets'],
             'release_url': item['release_url'], 'manifest_sha256': item['manifest_sha256'],
-            'assets': item['assets'], 'verified_at': item.get('verified_at'), 'r4os_releases':item.get('r4os_releases',[])}
+            'assets': item['assets'], 'verified_at': item.get('verified_at'), 'r4os_releases':item.get('r4os_releases',[]),
+            'tools':manifest['tools'],'system_libraries':manifest['system_libraries'],
+            'source_bindings':{key:{field:value[field] for field in ('repository','commit','version','path') if field in value}
+                               for key,value in manifest['sources'].items()}}
 
 
 def publish_index(store):
