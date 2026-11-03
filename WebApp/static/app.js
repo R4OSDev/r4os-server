@@ -37,7 +37,7 @@ window.R4 = (() => {
     document.querySelector('.submenu-column:not(.third-column)').innerHTML='<nav class="secondary-navigation" aria-label="'+esc(label)+' views">'+items.map(([id,label])=>'<a class="sub-item" href="#'+ctx.view+'/'+id+'"'+(ctx.sub===id?' aria-current="page"':'')+'>'+esc(label)+'</a>').join('')+'</nav>';
   };
   ui.context = (ctx,items=[]) => {
-    document.querySelector('.third-column').innerHTML=items.length?'<p class="column-caption">Selection</p><nav class="secondary-navigation">'+items.map(([id,label])=>'<a class="sub-item" href="#'+ctx.view+'/'+ctx.sub+'/'+encodeURIComponent(id)+'"'+((ctx.leaf||'all')===id?' aria-current="page"':'')+'>'+esc(label)+'</a>').join('')+'</nav>':'';
+    document.querySelector('.third-column').innerHTML=items.length?'<nav class="secondary-navigation" aria-label="Selection">'+items.map(([id,label])=>'<a class="sub-item" href="#'+ctx.view+'/'+ctx.sub+'/'+encodeURIComponent(id)+'"'+((ctx.leaf||'all')===id?' aria-current="page"':'')+'>'+esc(label)+'</a>').join('')+'</nav>':'';
   };
   ui.api = async (path,options={}) => {
     const controller=new AbortController(); const timeout=setTimeout(()=>controller.abort(),35000);
