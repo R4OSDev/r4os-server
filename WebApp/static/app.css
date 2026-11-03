@@ -277,6 +277,8 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 .panel > .record-list { margin: 0 16px 16px; }
 .record-list .record-list { margin-top: 16px; }
 .record-content > details { margin-top: 16px; }
+.record .area-minis { flex-wrap: wrap; min-width: 0; }
+.record .area-minis small { font-size: 11px; }
 .page-toolbar { flex: 0 0 auto; min-width: 0; background: var(--secondary); border-bottom: 1px solid var(--line); }
 .page-toolbar-inner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; max-width: 1600px; min-height: 52px; margin: 0 auto; padding: 9px 30px; }
 .page-refresh { display: flex; align-items: center; flex: 0 0 auto; }

@@ -59,7 +59,8 @@
   const osName=host=>typeof host?.metadata?.operating_system==='string'?host.metadata.operating_system:'';
   const ramMiB=host=>{try{return host?.hardware?.ram_bytes===null || host?.hardware?.ram_bytes===undefined?'':String(BigInt(host.hardware.ram_bytes)/1048576n);}catch{return '';}};
   B.hostCreateButton=()=>'<button class="button primary" data-host-create>Create host</button>';
-  B.hostActions=host=>'<div class="form-actions"><button class="button primary" data-host-edit="'+E(host.host_id)+'">Edit host</button></div>';
+  B.hostListActions=host=>'<button type="button" class="button primary" data-host-edit="'+E(host.host_id)+'">Edit host</button>';
+  B.hostActions=host=>'<div class="form-actions">'+B.hostListActions(host)+'</div>';
   function editHost(host=null){
     B.editingHost=host;
     const html='<form id="benchmark-host-editor"><div class="form-grid">'+field('host_id','Host-ID',host?.host_id || '','required maxlength="64" pattern="[a-z0-9][a-z0-9_-]{0,63}" '+(host?'readonly':''))+field('display_name','Display name',host?.display_name || '','required maxlength="128"')+field('cpu_model','CPU model',cpuModel(host),'maxlength="256"')+field('logical_cpus','Logical CPUs',host?.hardware?.logical_cpus ?? '','inputmode="numeric" pattern="[0-9]+"')+field('ram_mib','RAM (MiB)',ramMiB(host),'inputmode="numeric" pattern="[0-9]+"')+field('operating_system','Host operating system',osName(host))+'</div><label class="spaced-field">Description<textarea name="description" rows="3" maxlength="4096">'+E(host?.description || '')+'</textarea></label>'+field('tags','Tags, separated by commas',host?.tags.join(', ') || '')+'<p class="muted">The host ID remains stable. Changes apply to the host record; existing runs keep their original snapshot.</p><div class="form-actions"><button class="button primary" type="submit">Save host</button></div><p class="form-message" role="alert"></p></form>';
@@ -93,7 +94,8 @@
   });
 
   const runLink=(family,id,label)=>'<a class="button subtle" href="#benchmarks/'+family+'/'+encodeURIComponent('run:'+id)+'">'+E(label)+'</a>';
-  B.detailActions=(family,run)=>'<div class="dialog-toolbar"><button class="button" data-benchmark-export="'+family+'" data-run-id="'+E(run.run_id)+'">Export JSON</button>'+runLink(family,run.run_id,'Direct link')+(family==='spectra' && B.reference(run)?runLink(family,B.reference(run),'Open reference'):'')+'</div>';
+  B.listActions=(family,run)=>'<button type="button" class="button subtle" data-benchmark-export="'+family+'" data-run-id="'+E(run.run_id)+'">Export JSON</button>'+runLink(family,run.run_id,'Direct link')+(family==='spectra' && B.reference(run)?runLink(family,B.reference(run),'Open reference'):'');
+  B.detailActions=(family,run)=>'<div class="dialog-toolbar">'+B.listActions(family,run)+'</div>';
   B.detailExtra=(family,run)=>family==='snes'?panel('Compare runs','<form id="snes-comparison-form" class="panel-body"><div class="comparison-controls"><label>Reference run (UUID)<input name="reference_run_id" required maxlength="36" placeholder="Full run UUID" list="snes-reference-options"></label><datalist id="snes-reference-options">'+(B.states.snes.page?.items || []).filter(value=>value.run_id!==run.run_id).map(value=>'<option value="'+E(value.run_id)+'">'+E(hostName(value.host_id)+' / '+value.profile+' / '+value.region)+'</option>').join('')+'</datalist><button class="button primary" type="submit">Compare</button></div><p class="muted">Choose the reference explicitly. A direct performance comparison requires matching workload, region, profile, mode and conditions.</p><div id="snes-comparison-result" aria-live="polite"></div></form>'):'';
   let compareGeneration=0;
   document.addEventListener('submit',async event=>{

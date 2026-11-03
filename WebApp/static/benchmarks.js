@@ -22,6 +22,7 @@
   const assessmentBadge=run=>run.server_scoring?.applicable?'<span class="muted">Server</span> '+U.badge(run.server_scoring.status)+' <span class="muted">Reported</span> '+U.badge(run.score_validation.status):U.badge(run.score_validation.status);
   const score=(run,area)=>{const value=B.assessment(run)?.areas?.[area];return value?.score===null || !value?'—':'<span class="score-value '+(value.status==='valid'?'':'score-unqualified')+'" title="'+E(value.score+' · '+B.reason(value.reason))+'">'+E(U.number(value.score))+'</span>';};
   const runButton=(family,run,text)=>'<button class="text-button" data-benchmark-run="'+E(run.run_id)+'" data-family="'+family+'">'+E(text)+'</button>';
+  const runActions=(family,run)=>'<button type="button" class="button subtle" data-benchmark-run="'+E(run.run_id)+'" data-family="'+family+'">Details</button>'+(B.listActions?B.listActions(family,run):'');
   const paging=(family,page)=>'<div class="pagination"><span>'+E(U.count(page.total))+' runs · '+(page.total?E(U.count(page.offset+1))+'–'+E(U.count(page.offset+page.items.length)):'0')+'</span><div><button class="button subtle" data-benchmark-page="previous" data-family="'+family+'"'+(page.offset===0?' disabled':'')+'>Previous</button><button class="button subtle" data-benchmark-page="next" data-family="'+family+'"'+(page.offset+page.items.length>=page.total?' disabled':'')+'>Next</button></div></div>';
   const hostOptions=()=>B.hosts.map(host=>[host.host_id,host.display_name+' / '+host.host_id]);
   function filters(family,inventory={}){
@@ -50,8 +51,8 @@
     if(family==='hosts'){
       U.context(ctx,[['all','All hosts'],...B.hosts.map(host=>['host:'+host.host_id,host.display_name])]);
       const items=ctx.leaf.startsWith('host:')?B.hosts.filter(host=>host.host_id===ctx.leaf.slice(5)):B.hosts;
-      const rows=items.map(host=>['<button class="text-button" data-benchmark-host="'+E(host.host_id)+'">'+E(host.display_name)+'</button><small class="cell-subline">'+E(host.host_id)+'</small>',E(host.hardware.cpu?.model || (typeof host.hardware.cpu==='string'?host.hardware.cpu:'—')),E(U.count(host.hardware.logical_cpus)),'<span title="'+E(host.hardware.ram_bytes || '')+'">'+E(U.bytes(host.hardware.ram_bytes))+'</span>',E(U.count(host.run_count))]);
-      U.page(ctx,'Hosts','Stable identities for benchmark hosts. Saved runs retain their historical snapshots.',panel('Host records',rows.length?U.table(['Host','CPU','Logical CPUs','RAM','Runs'],rows):U.empty('No hosts yet','Create a benchmark host before the runner submits its first run.')),B.hostCreateButton?B.hostCreateButton():'');
+      const rows=items.map(host=>U.record('<h2 class="record-name">'+E(host.display_name)+'</h2><span class="record-subline">'+E(host.host_id)+'</span>'+(host.description?'<p class="record-description">'+E(host.description)+'</p>':'')+U.fields([['CPU',E(host.hardware.cpu?.model || (typeof host.hardware.cpu==='string'?host.hardware.cpu:'—'))],['Logical CPUs',E(U.count(host.hardware.logical_cpus))],['RAM','<span title="'+E(host.hardware.ram_bytes || '')+'">'+E(U.bytes(host.hardware.ram_bytes))+'</span>'],['Runs',E(U.count(host.run_count))]]),'<button type="button" class="button subtle" data-benchmark-host="'+E(host.host_id)+'">Details</button>'+(B.hostListActions?B.hostListActions(host):''),' data-host-id="'+E(host.host_id)+'"'));
+      U.page(ctx,'Hosts','Stable identities for benchmark hosts. Saved runs retain their historical snapshots.','<section class="record-section" aria-label="Host records">'+(rows.length?U.records(rows,'Benchmark hosts'):U.empty('No hosts yet','Create a benchmark host before the runner submits its first run.'))+'</section>',B.hostCreateButton?B.hostCreateButton():'');
       U.status('Host registry loaded.');return;
     }
     const state=states[family];
@@ -61,22 +62,20 @@
     const collection=family==='spectra'?'benchmark-runs':'subsystem-benchmark-runs';
     const [page,inventory]=await Promise.all([U.api('benchmarks/'+collection+'?'+query),family==='spectra'?U.api('benchmarks/benchmark-filters'):Promise.resolve({})]);
     if(ctx.generation!==U.generation)return;state.page=page;
-    let rows,headers,description;
+    let rows,description;
     if(family==='spectra'){
       description='Server-calculated indices use the first valid compatible reference. Reference = 100 points; reported scores retain their original reference.';
-      headers=['Measurement (UTC)','Host / version','Overall index','Areas','Run / score'];
-      rows=page.items.map(run=>[runButton(family,run,U.date(run.started_at_utc))+'<small class="cell-subline">'+E(run.run_id.slice(0,8))+'</small>',E(run.host_name || hostName(run.host_id))+'<small class="cell-subline">R4OS '+E(run.release_version || '—')+' · '+E(run.suite_version || '—')+'</small>',score(run,'overall'),'<div class="area-minis">'+Object.entries(shortAreas).map(([area,label])=>'<span title="'+E(areas[area])+'"><small>'+label+'</small>'+score(run,area)+'</span>').join('')+'</div>',U.badge(run.status)+' '+assessmentBadge(run)]);
+      rows=page.items.map(run=>U.record('<h2 class="record-name">'+E(run.host_name || hostName(run.host_id))+'</h2><span class="record-subline">R4OS '+E(run.release_version || '—')+' · Spectra '+E(run.spectra_version || '—')+' · Suite '+E(run.suite_version || '—')+'</span><p class="record-description">'+E(U.date(run.started_at_utc))+' · '+E(run.run_id.slice(0,8))+'</p>'+U.fields([['Overall index · '+(run.server_scoring?.applicable?'server reference':'reported reference'),score(run,'overall')],['Area indices','<div class="area-minis">'+Object.entries(shortAreas).map(([area,label])=>'<span title="'+E(areas[area])+'"><small>'+label+'</small>'+score(run,area)+'</span>').join('')+'</div>'],['Run status',U.badge(run.status)],['Score validation',assessmentBadge(run)]]),runActions(family,run),' data-run-id="'+E(run.run_id)+'"'));
     }else{
       description='Fixed guest workload, separate execution profiles and direct measurements. No SNES point score.';
-      headers=['Measurement (UTC)','Host / profile','Scene / version','Wall time / real-time factor','Run / validation'];
       rows=page.items.map(run=>{
         const valid=run.validation.status==='valid',summary=run.validation.computed_summary;
-        return [runButton(family,run,U.date(run.started_at_utc))+'<small class="cell-subline">'+E(run.run_id.slice(0,8))+'</small>',E(hostName(run.host_id))+'<small class="cell-subline">'+E(profiles[run.profile]+' · '+run.region.toUpperCase()+' · '+modes[run.instrumentation_mode])+'</small>',E(run.workload.scene_id || '—')+'<small class="cell-subline">R4SNES '+E(run.versions.emulator_version || '—')+' · R4OS '+E(run.versions.release_version || '—')+'</small>',valid?'<span title="'+E(summary.wall_ns.median_value)+' ns">'+E(U.number(Number(summary.wall_ns.median_value)/1e6))+' ms</span><small class="cell-subline">'+E(U.number(summary.realtime_factor.median_value))+' × real time</small>':'—',U.badge(run.status)+' '+U.badge(run.validation.status)];
+        return U.record('<h2 class="record-name">'+E(hostName(run.host_id))+'</h2><span class="record-subline">R4OS '+E(run.versions.release_version || '—')+' · R4SNES '+E(run.versions.emulator_version || '—')+'</span><p class="record-description">'+E(U.date(run.started_at_utc))+' · '+E(run.run_id.slice(0,8))+'</p>'+U.fields([['Profile',E(profiles[run.profile]+' · '+run.region.toUpperCase()+' · '+modes[run.instrumentation_mode])],['Scene',E(run.workload.scene_id || '—')],['Wall time',valid?'<span title="'+E(summary.wall_ns.median_value)+' ns">'+E(U.number(Number(summary.wall_ns.median_value)/1e6))+' ms</span>':'—'],['Real-time factor',valid?E(U.number(summary.realtime_factor.median_value))+' ×':'—'],['Run status',U.badge(run.status)],['Validation',U.badge(run.validation.status)]]),runActions(family,run),' data-run-id="'+E(run.run_id)+'"');
       });
     }
     let html=filters(family,inventory);
     if(B.trend)html+=B.trend(family,page.items);
-    html+=panel(family==='spectra'?'Spectra runs':'SNES runs',rows.length?U.table(headers,rows)+paging(family,page):U.empty('No matching runs','Change the filters or submit a real benchmark run through the runner.'));
+    html+='<section class="record-section" aria-label="'+(family==='spectra'?'Spectra runs':'SNES runs')+'">'+(rows.length?U.records(rows,family==='spectra'?'Spectra runs':'SNES runs')+paging(family,page):U.empty('No matching runs','Change the filters or submit a real benchmark run through the runner.'))+'</section>';
     U.page(ctx,family==='spectra'?'Spectra':'SNES',description,html);U.status(U.count(page.total)+' benchmark runs found.');
     if(ctx.leaf.startsWith('run:'))await openRun(family,ctx.leaf.slice(4));
   };
