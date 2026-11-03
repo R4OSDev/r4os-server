@@ -58,28 +58,17 @@ a:focus-visible {
 .repository-name { border: 0; background: none; padding: 0; color: #acd1b5; font: inherit; font-size: 17px; font-weight: 600; cursor: pointer; text-align: left; overflow-wrap: anywhere; min-width: 0; }
 .repository-name:hover,.artifact-link:hover { text-decoration: underline; }
 .repository-name:focus-visible { outline: 2px solid #b7d8b8; outline-offset: 5px; }
-.repository-filters { display: grid; grid-template-columns: minmax(140px,1fr) minmax(140px,1fr) minmax(180px,1.5fr); align-items: end; gap: 16px; margin: 20px; }
-.repository-list { margin-inline: 20px; }
+.repository-filters { display: grid; grid-template-columns: minmax(140px,1fr) minmax(140px,1fr) minmax(180px,1.5fr); align-items: end; gap: 16px; margin: 0 0 18px; }
+.repository-info { margin-top: 12px; }
 .repo-search,.repo-category,.repo-account { width: 100%; min-width: 0; font-size: 11px; }
 .repo-search input,.repo-category select,.repo-account select { margin-top: 5px; }
-.repository-table { width: 100%; table-layout: fixed; }
-.repository-table th { padding: 12px 10px; font-size: 11px; white-space: normal; }
-.repository-table th:first-child { width: 37%; }
-.repository-table th:nth-child(2) { width: 15%; }
-.repository-table th:nth-child(3) { width: 21%; }
-.repository-table th:last-child { width: 27%; text-align: right; }
-.repository-table td { padding: 17px 10px; vertical-align: top; font-size: 12px; overflow-wrap: anywhere; }
-.repository-table td:first-child { padding-left: 0; }
-.repository-table td:last-child { padding-right: 0; }
-.repository-owner { display: block; margin-bottom: 12px; text-align: right; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
-.repository-description,.repository-local { min-width: 0; overflow-wrap: anywhere; }
+.repository-owner { flex: 0 1 auto; max-width: 40%; overflow-wrap: anywhere; }
+.repository-local { min-width: 0; overflow-wrap: anywhere; }
 .repository-entry p { margin: 6px 0 10px; }
 .repository-local p { color: var(--muted); font-size: 11px; }
 .repository-local[data-local-status="current"] > .badge { color: #b2dbc0; background: #243b2d; }
 .repository-local:is([data-local-status="outdated"],[data-local-status="modified"],[data-local-status="diverged"],[data-local-status="ahead"],[data-local-status="conflict"]) > .badge { color: #e2c185; background: #3d3220; }
-.repository-table .badge { white-space: normal; }
-.repository-labels { display: flex; flex-wrap: wrap; gap: 6px; }
-.repo-row-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.repository-labels { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .repository-publish { display: inline-flex; align-items: center; gap: 7px; align-self: center; padding: 8px 0; cursor: pointer; }
 .repository-publish input { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); }
 .app-description { margin: 8px 0; color: var(--muted); white-space: pre-wrap; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
@@ -87,14 +76,6 @@ a:focus-visible {
 @media(max-width:1100px) {
   .repository-filters { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .repository-filters .repo-search { grid-column: 1/-1; }
-  .repository-table,.repository-table tbody { display: block; }
-  .repository-table thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
-  .repository-table .repository-entry { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,110px); grid-template-areas: "description actions" "category actions" "local local"; gap: 10px 14px; padding: 17px 0; border-top: 1px solid var(--line); }
-  .repository-table td { padding: 0; border: 0; }
-  .repository-description { grid-area: description; }
-  .repository-category-cell { grid-area: category; }
-  .repository-local { grid-area: local; }
-  .repository-actions-cell { grid-area: actions; }
 }
 @media(max-width:600px) { .repository-filters { grid-template-columns: minmax(0,1fr); } .repository-filters > label { width: 100%; } .repository-name { font-size: 16px; } }
 .build-log { max-height: 46vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; background: #11171b; padding: 18px; font-size: 11px; line-height: 1.6; }
@@ -438,8 +419,6 @@ progress { display: block; width: 100%; height: 8px; accent-color: #91caaa; marg
   .record-grid { grid-template-columns: minmax(0,1fr); gap: 14px; }
   .record-fields { grid-template-columns: minmax(0,1fr); }
   .record-actions { padding: 10px 14px; }
-  .repository-filters { margin: 14px; }
-  .repository-list { margin-inline: 14px; }
 }
 .release-targets { margin: 0 0 12px 32px; }
 .release-targets label { display: block; padding: 5px 0; }

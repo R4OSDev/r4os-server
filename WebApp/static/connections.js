@@ -5,7 +5,10 @@
   let current=null;
   const pencil='<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="m15 4 5 5M4 20l5-1 12-12-5-5L4 14v6Z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>';
   async function refresh(){
-    if(U.current?.view==='repositories'&&U.current.sub==='connections')await U.navigate();
+    if(U.current?.view!=='repositories'||U.current.sub!=='connections')return;
+    const leaf=U.current.leaf,scroll=U.scrollContainer().scrollTop;
+    await U.navigate();
+    if(U.current.view==='repositories'&&U.current.sub==='connections'&&U.current.leaf===leaf)U.scrollContainer().scrollTop=scroll;
   }
   function schedule(ctx){
     U.poll=setTimeout(()=>{
@@ -31,8 +34,8 @@
     if(connection.credential_error)html+='<p class="workspace-notice" role="alert">'+E(connection.credential_error)+'</p>';
     if(connection.error||connection.catalog.error)html+='<p class="workspace-notice" role="alert">'+E(connection.error||connection.catalog.error)+'</p>';
     if(!state.worker.ready)html+='<p class="workspace-notice">The repository worker is unavailable. Jobs remain queued until it starts.</p>';
-    html+='<section class="panel"><div class="panel-heading"><h2>Repositories</h2><div class="form-actions"><button type="button" class="button subtle" data-connection-action="enable-all"'+(!ready||!repos.some(repo=>repo.available)?' disabled':'')+'>Enable all</button><button type="button" class="button subtle" data-connection-action="disable-all"'+(!ready||!repos.length?' disabled':'')+'>Disable all</button></div></div>';
-    html+=repos.length?U.table(['Use in server','Repository','Visibility','Description','Local checkout'],repos.map(repo=>['<input type="checkbox" data-connection-repository="'+E(repo.name)+'" aria-label="Use '+E(repo.display_name)+' in the server"'+(repo.enabled?' checked':'')+(!ready||(!repo.available&&!repo.enabled)?' disabled':'')+'>','<a class="artifact-link" href="'+E(repo.url)+'" target="_blank" rel="noopener noreferrer">'+E(repo.display_name)+'</a>'+(!repo.available?'<small class="muted">'+E(repo.unavailable_reason)+'</small>':''),repo.private?'Private':'Public',E(repo.description),E(repo.local.commit||repo.local.status==='empty'?'Downloaded':'Not downloaded')])):U.empty('No repositories yet',connection.catalog.updated?'This account has no accessible repositories.':'Refresh the catalogue to load this account’s repositories.');
+    html+='<section class="record-section"><div class="panel-heading"><h2>Repositories</h2><div class="form-actions"><button type="button" class="button subtle" data-connection-action="enable-all"'+(!ready||!repos.some(repo=>repo.available)?' disabled':'')+'>Enable all</button><button type="button" class="button subtle" data-connection-action="disable-all"'+(!ready||!repos.length?' disabled':'')+'>Disable all</button></div></div>';
+    html+=repos.length?U.records(repos.map(repo=>U.record('<div class="record-head"><div><a class="record-name artifact-link" href="'+E(repo.url)+'" target="_blank" rel="noopener noreferrer">'+E(repo.display_name)+'</a><p class="record-description">'+E(repo.description)+'</p>'+(!repo.available?'<p class="muted">'+E(repo.unavailable_reason)+'</p>':'')+'</div><span class="badge">'+(repo.private?'Private':'Public')+'</span></div><span class="record-subline">'+E(repo.local.commit||repo.local.status==='empty'?'Downloaded':'Not downloaded')+'</span>','<label class="toggle-control"><input type="checkbox" data-connection-repository="'+E(repo.name)+'" aria-label="Use '+E(repo.display_name)+' in the server"'+(repo.enabled?' checked':'')+(!ready||(!repo.available&&!repo.enabled)?' disabled':'')+'> Use in server</label>')),'Connection repositories'):U.empty('No repositories yet',connection.catalog.updated?'This account has no accessible repositories.':'Refresh the catalogue to load this account’s repositories.');
     html+='</section>';
     const jobs=state.jobs.filter(job=>active(job)&&(job.payload.connection_id===key||repos.some(repo=>repo.name===job.subject)));
     if(jobs.length)html+='<p class="muted" role="status">'+jobs.map(job=>E(job.phase||'Job queued')).join(' · ')+'</p>';
