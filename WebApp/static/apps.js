@@ -5,13 +5,14 @@
   U.views.apps=async ctx=>{
     U.side(ctx,[['overview','Overview']]);
     const value=await api('overview');if(ctx.generation!==U.generation)return;
-    const rows=value.apps.map(app=>[
-      '<strong class="app-name">'+E(app.display_name)+'</strong>'+(app.description?'<p class="app-description">'+E(app.description)+'</p>':'')+'<small class="muted">Version '+E(app.version)+'</small>',
-      '<span class="app-install-path">'+E(app.install_path)+'</span>',
-      E(app.owner)+'<small class="cell-subline">'+E(app.repository_name)+'</small>'+(app.private?'<span class="badge">Private</span>':'')+(!app.source_available?'<p class="muted">'+E(app.source_error||'Source unavailable')+'</p>':''),
-      '<button type="button" class="button subtle" data-edit-app="'+E(app.repository)+'" aria-label="Edit '+E(app.display_name)+'">Edit</button>'
-    ]);
-    const html=rows.length?'<section class="panel apps-list" aria-label="Apps overview">'+U.table(['App','Install-Path','Source','Actions'],rows)+'</section>':value.publishing?U.empty('Adding apps','Apps appear here after their manifests have been read.'):U.empty('No apps listed','Enable Show in Apps for an application in Repositories → Overview.');
+    const rows=value.apps.map(app=>U.record(
+      '<div class="record-grid"><div class="record-identity"><h2 class="record-name app-name">'+E(app.display_name)+'</h2><span class="record-subline app-version">Version '+E(app.version)+'</span>'+(app.description?'<p class="app-description">'+E(app.description)+'</p>':'')+'</div>'+
+      '<div role="group" aria-label="Install-Path"><span class="app-install-path">'+E(app.install_path)+'</span></div>'+
+      '<div role="group" aria-label="Source">'+E(app.owner)+'<small class="cell-subline">'+E(app.repository_name)+'</small>'+(app.private?'<span class="badge">Private</span>':'')+(!app.source_available?'<p class="muted">'+E(app.source_error||'Source unavailable')+'</p>':'')+'</div></div>',
+      '<button type="button" class="button subtle" data-edit-app="'+E(app.repository)+'" aria-label="Edit '+E(app.display_name)+'">Edit</button>',
+      ' data-app-repository="'+E(app.repository)+'"'
+    ));
+    const html=rows.length?'<section class="apps-list" aria-label="Apps overview">'+U.records(rows,'Apps')+'</section>':value.publishing?U.empty('Adding apps','Apps appear here after their manifests have been read.'):U.empty('No apps listed','Enable Show in Apps for an application in Repositories → Overview.');
     U.page(ctx,'Apps','',html);U.status('Apps loaded.');
     if(value.publishing)poll(ctx);
   };

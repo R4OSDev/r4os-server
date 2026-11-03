@@ -19,6 +19,9 @@ window.R4 = (() => {
   ui.fold = (title,value) => '<details class="data-fold"><summary>'+esc(title)+'</summary>'+ui.raw(value)+'</details>';
   ui.empty = (title,text='') => '<div class="empty-state"><span class="empty-mark" aria-hidden="true">◇</span><h2>'+esc(title)+'</h2><p>'+esc(text)+'</p></div>';
   ui.table = (headers,rows) => '<div class="table-scroll"><table><thead><tr>'+headers.map(v=>'<th>'+esc(v)+'</th>').join('')+'</tr></thead><tbody>'+rows.map(row=>'<tr>'+row.map(v=>'<td>'+v+'</td>').join('')+'</tr>').join('')+'</tbody></table></div>';
+  ui.record = (html,actions='',attributes='',className='') => '<article class="record'+(className?' '+esc(className):'')+'" role="listitem"'+attributes+'><div class="record-content">'+html+'</div>'+(actions?'<div class="record-actions">'+actions+'</div>':'')+'</article>';
+  ui.records = (items,label='',attributes='') => '<div class="record-list" role="list"'+(label?' aria-label="'+esc(label)+'"':'')+attributes+'>'+items.join('')+'</div>';
+  ui.fields = items => '<dl class="record-fields">'+items.map(([label,html])=>'<div><dt>'+esc(label)+'</dt><dd>'+html+'</dd></div>').join('')+'</dl>';
   ui.card = (label,value,note='') => '<div class="metric-card"><span>'+esc(label)+'</span><strong>'+esc(value)+'</strong><small>'+esc(note)+'</small></div>';
   ui.show = (ctx,html) => {if(ctx.generation===ui.generation) content.innerHTML=html;};
   ui.scrollContainer = () => content.querySelector('.page-scroll') || content;
