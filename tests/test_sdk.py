@@ -59,6 +59,20 @@ class SDKTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'immutable registration'):sdk_packages.verify(self.context,'sdk-fixture')
             run.assert_not_called()
 
+    def test_cleanup_removes_legacy_sources_and_keeps_current_recovery_and_receipts(self):
+        from r4os_server.workspace import sdk_cleanup
+        legacy=self.store.root/'BuildTools/Toolsets/legacy';legacy.mkdir()
+        (legacy/'toolset.json').write_text(json.dumps({'id':'legacy','status':'ready','sources':{'SDK':{'version':'0.64.100'}}}))
+        job=self.store.enqueue('build','old-source',{'toolset':'legacy'});self.store.change_job(job['id'],status='completed',result={'historical':True})
+        old=self.store.root/'BuildTools/Workspaces'/job['id'];old.mkdir(parents=True);(old/'old-source').write_text('obsolete')
+        recovery=sdk_packages.root(self.store,'sdk-fixture')/'Content/RECOVERY';recovery.mkdir(parents=True);(recovery/'frozen').write_text('current SDK component')
+        artifact=self.store.root/'Artifacts/saved.bin';artifact.parent.mkdir(exist_ok=True);artifact.write_bytes(b'user artifact')
+        with patch.object(toolsets,'validate',return_value={'ready':True}):result=sdk_cleanup.cleanup(self.context)
+        self.assertIn('0.64.100',result['obsolete_sdk_versions']);self.assertFalse(legacy.exists());self.assertFalse(old.exists())
+        self.assertTrue((recovery/'frozen').is_file());self.assertEqual(artifact.read_bytes(),b'user artifact')
+        self.assertEqual(self.store.job(job['id'])['result'],{'historical':True})
+        self.assertEqual(toolsets.active(self.store)[1]['sdk_id'],'sdk-fixture')
+
     def test_verified_repeat_reuses_immutable_package_offline(self):
         with patch.object(sdk_packages,'verify',return_value={'verified':True}) as verify,patch.object(sdk_packages,'fetch',side_effect=AssertionError('network used')):
             result=sdk_packages.import_release(self.context,{'release_url':'https://github.com/R4OSDev/r4os-sdk/releases/tag/v0.64.145'})

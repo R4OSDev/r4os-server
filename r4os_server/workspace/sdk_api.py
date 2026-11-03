@@ -72,6 +72,9 @@ def dispatch(handler):
                 value=data(handler)
                 if set(value)!={'profile'}: raise ValueError('Specify the SDK profile ID.')
                 return handler.json(202,store.enqueue('sdk_profile','sdk',{'sdk_id':parts[1],'action':parts[2],'profile':value['profile']}))
+        if parts == ['cleanup'] and read:
+            from .sdk_cleanup import inventory
+            return handler.json(200,inventory(store))
         if parts == ['cleanup'] and handler.command=='POST':
             value=data(handler)
             if value!={'confirmed':True}: raise ValueError('Confirm removal of obsolete local SDK environments.')
