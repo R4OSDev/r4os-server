@@ -1,5 +1,6 @@
 """Boundary checks for immutable SDK packages and removal of legacy contracts."""
 import copy
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import io
 import json
@@ -7,12 +8,13 @@ from pathlib import Path
 import tarfile
 import tempfile
 import subprocess
+import time
 import unittest
 from unittest.mock import patch
 
-from r4os_server.workspace import sdk_catalog, sdk_packages, sdk_projects, toolsets
-from r4os_server.workspace.process import Context
-from r4os_server.workspace.store import Store
+from r4os_server.workspace import sdk_catalog, sdk_install, sdk_packages, sdk_projects, toolsets, worker
+from r4os_server.workspace.process import Cancelled, Context
+from r4os_server.workspace.store import Conflict, Store, now
 from sdk_fixture import install
 
 
@@ -49,16 +51,16 @@ class SDKTests(unittest.TestCase):
         first=[release('0.64.'+str(n),n+1) for n in range(98)]+[release('0.64.145',145),release('0.64.99',99)]
         draft=dict(release('9.9.9',999),draft=True)
         old=dict(release('0.63.9',6309),assets=[])
-        with patch.object(catalog_module:=sdk_catalog.catalog,'public_json',side_effect=[(first,{'Link':'<next>; rel="next"'}),([release('0.64.146',146),draft,old],{})]) as request,patch.object(sdk_catalog,'_manifest',return_value='1'*64):
+        with patch.object(sdk_catalog.catalog,'public_json',side_effect=[(first,{'Link':'<next>; rel="next"'}),([release('0.64.146',146),draft,old],{})]) as request,patch.object(sdk_catalog,'_manifest',return_value='1'*64):
             value=sdk_catalog.overview(self.store,refresh=True)
         self.assertEqual(request.call_count,2)
         self.assertEqual([r['version'] for r in value['releases'][:3]],['0.64.146','0.64.145','0.64.99'])
         self.assertEqual(len(value['releases']),102)
         self.assertEqual(value['releases'][1]['state'],'active')
         self.assertFalse(value['releases'][-1]['supported'])
-        with patch.object(catalog_module,'public_json',side_effect=AssertionError('cache bypassed')):
+        with patch.object(sdk_catalog.catalog,'public_json',side_effect=AssertionError('cache bypassed')):
             self.assertEqual(sdk_catalog.overview(self.store)['releases'][1]['state'],'active')
-        with patch.object(catalog_module,'public_json',side_effect=RuntimeError('unavailable')):
+        with patch.object(sdk_catalog.catalog,'public_json',side_effect=RuntimeError('unavailable')):
             offline=sdk_catalog.overview(self.store,refresh=True)
         self.assertTrue(offline['catalog']['stale']);self.assertTrue(offline['catalog']['error'])
         self.assertEqual(offline['catalog']['updated'],value['catalog']['updated'])
@@ -78,8 +80,89 @@ class SDKTests(unittest.TestCase):
         value['host']='Linux';receipt.write_text(json.dumps(value))
         path=sdk_packages.root(self.store,'sdk-fixture')/'Payload/original.bin';path.write_bytes(b'modified SDK asset')
         self.assertFalse(sdk_catalog.prepared(self.store,package,env))
-        self.store.set(sdk_catalog.CACHE_KEY,{'releases':[{'release_url':package['release_url'],'tag':'v0.64.145','version':'0.64.145','supported':True,'manifest_sha256':'2'*64}],'attempted':__import__('time').time(),'error':''})
+        self.store.set(sdk_catalog.CACHE_KEY,{'releases':[{'release_url':package['release_url'],'tag':'v0.64.145','version':'0.64.145','supported':True,'manifest_sha256':'2'*64}],'attempted':time.time(),'error':''})
         self.assertEqual(sdk_catalog.overview(self.store)['releases'][0]['state'],'unsupported')
+
+    def new_selection_package(self):
+        import shutil
+        package=self.prepare_selection();package=copy.deepcopy(package)
+        package.update(id='sdk-new',release_url=package['release_url'].replace('0.64.145','0.64.146'))
+        package['manifest']['sdk_version']='0.64.146';package['manifest_sha256']='2'*64
+        with self.store.connect() as db:db.execute('INSERT INTO sdk_packages VALUES(?,?,?,?,?,?,?)',('sdk-new','0.64.146','ready',json.dumps(package),'',now(),now()))
+        shutil.copytree(sdk_packages.root(self.store,'sdk-fixture'),sdk_packages.root(self.store,'sdk-new'))
+        return package
+
+    def fake_setup(self, context, sdk_id, root, names, *, check=False):
+        self.assertEqual(self.store.setting('active_sdk'),'sdk-fixture')
+        if check:return '{}',0
+        package=sdk_packages.get(self.store,sdk_id)
+        for name in names:
+            path=root/{'zig':'Toolchains/Zig/zig','rust':'Toolchains/Rust/cargo/bin/rustc','limine':'Boot/Limine/limine'}[name]
+            path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b'fixture, never executed')
+        (root/'.SDK-Tools.json').write_text(json.dumps({'schema':1,'sdk_version':package['manifest']['sdk_version'],'host':'Linux','profiles':sdk_packages.provenance(package)['profile_sources'],'tools':{n:{'ready':True} for n in names}}))
+        return '{}',0
+
+    def test_sdk_selection_prepares_then_atomically_activates_and_repeats_offline(self):
+        package=self.new_selection_package();value={'release_url':package['release_url']}
+        job=self.store.enqueue('sdk_select','sdk',value);self.store.change_job(job['id'],status='running')
+        context=Context(self.store,job)
+        original=(self.store.root/'BuildTools/Toolsets/test-tools/toolset.json').read_bytes()
+        with patch.object(sdk_packages,'verify',return_value={}),patch.object(sdk_packages,'fetch',side_effect=AssertionError('network download')),patch.object(toolsets,'run_setup',side_effect=self.fake_setup),patch.object(context,'run',return_value=('PowerShell fixture',0)):
+            result=worker.execute(context)
+        self.assertTrue(result['activation_committed']);self.assertEqual(result['sdk_id'],'sdk-new')
+        self.assertEqual(self.store.setting('active_toolset'),result['active'])
+        self.assertEqual(self.store.setting('active_sdk'),'sdk-new')
+        self.assertEqual((self.store.root/'BuildTools/Toolsets/test-tools/toolset.json').read_bytes(),original)
+        self.assertTrue(self.store.job(job['id'])['result']['activation_committed'])
+        self.store.cancel_job(job['id']);self.assertFalse(self.store.job(job['id'])['cancel'])
+        self.store.recover();self.assertEqual(self.store.job(job['id'])['status'],'completed')
+        again=self.store.enqueue('sdk_select','sdk',value);again_context=Context(self.store,again)
+        with patch.object(sdk_packages,'verify',return_value={}),patch.object(sdk_packages,'fetch',side_effect=AssertionError('network download')),patch.object(toolsets,'install',side_effect=AssertionError('unnecessary installation')),patch.object(toolsets,'run_setup',return_value=('{}',0)):
+            repeated=worker.execute(again_context)
+        self.assertEqual(repeated['active'],result['active'])
+
+    def test_sdk_failed_setup_cancellation_retry_and_real_download_progress(self):
+        package=self.new_selection_package();value={'release_url':package['release_url']}
+        job=self.store.enqueue('sdk_select','sdk',value);context=Context(self.store,job)
+        with patch.object(sdk_packages,'verify',return_value={}),patch.object(toolsets,'run_setup',side_effect=RuntimeError('setup failed')):
+            with self.assertRaisesRegex(RuntimeError,'setup failed'):worker.execute(context)
+        self.assertEqual(self.store.setting('active_sdk'),'sdk-fixture')
+        self.store.change_job(job['id'],status='failed')
+        cancelled=self.store.enqueue('sdk_select','sdk',value);context=Context(self.store,cancelled)
+        def stop_after_setup(*args,**kwargs):
+            result=self.fake_setup(*args,**kwargs)
+            self.store.cancel_job(cancelled['id']);return result
+        with patch.object(sdk_packages,'verify',return_value={}),patch.object(toolsets,'run_setup',side_effect=stop_after_setup),patch.object(context,'run',return_value=('PowerShell fixture',0)):
+            with self.assertRaises(Cancelled):worker.execute(context)
+        self.assertEqual(self.store.setting('active_sdk'),'sdk-fixture')
+        self.store.change_job(cancelled['id'],status='cancelled')
+        retry=self.store.enqueue('sdk_select','sdk',value);context=Context(self.store,retry)
+        with patch.object(sdk_packages,'verify',return_value={}),patch.object(toolsets,'run_setup',side_effect=self.fake_setup),patch.object(context,'run',return_value=('PowerShell fixture',0)):
+            result=worker.execute(context)
+        self.assertEqual(result['sdk_id'],'sdk-new')
+        self.store.change_job(retry['id'],status='completed')
+        progress_job=self.store.enqueue('sdk_select','sdk',value);context=Context(self.store,progress_job)
+        raw=b'a'*(1024*1024+7);response=io.BytesIO(raw);response.headers={'Content-Length':str(len(raw))}
+        destination=Path(self.temp.name)/'download.bin'
+        with patch.object(sdk_packages.urllib.request,'urlopen',return_value=response):
+            sdk_packages.fetch(context,'https://example.test/asset',destination,expected=hashlib.sha256(raw).hexdigest(),size=len(raw))
+        progress=self.store.job(progress_job['id'])['result']['progress']
+        self.assertEqual(progress['downloaded_bytes'],len(raw));self.assertEqual(progress['total_bytes'],len(raw));self.assertEqual(progress['percent'],100)
+        context.phase('Checking the package');self.assertTrue(self.store.job(progress_job['id'])['result']['progress']['indeterminate'])
+
+    def test_sdk_parallel_selection_and_legacy_actions_share_one_mutation_slot(self):
+        value={'release_url':'https://github.com/R4OSDev/r4os-sdk/releases/tag/v0.64.146'}
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            jobs=list(pool.map(lambda _:self.store.enqueue('sdk_select','sdk',value),range(6)))
+        self.assertEqual(len({j['id'] for j in jobs}),1)
+        for kind,payload in [('sdk_select',{'release_url':value['release_url'].replace('146','147')}),('tools_activate',{'id':'test-tools'}),('tools_install',{'sdk_id':'sdk-fixture'}),('sdk_import',value),('sdk_cleanup',{'confirmed':True})]:
+            with self.assertRaises(Conflict):self.store.enqueue(kind,'sdk' if kind.startswith('sdk_') else 'tools',payload)
+        self.store.cancel_job(jobs[0]['id'])
+        job=self.store.enqueue('tools_activate','tools',{'id':'test-tools'});context=Context(self.store,job)
+        self.store.cancel_job(job['id'])
+        with patch.object(toolsets,'validate',return_value={}):
+            with self.assertRaises(Cancelled):toolsets.perform(context,'activate',{'id':'test-tools'})
+        self.assertEqual(self.store.setting('active_sdk'),'sdk-fixture')
 
     def test_strict_originals_and_unknown_schema(self):
         for raw in (b'{"schema":1,"Schema":1}',b'{"id":1,"id":2}',b'{"n":NaN}'):

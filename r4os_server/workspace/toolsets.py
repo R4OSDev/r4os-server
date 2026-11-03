@@ -1,6 +1,7 @@
 """Installed SDK-owned build environments; no independent tool or component pins."""
 import hashlib
 import json
+import os
 from pathlib import Path
 import platform
 import shutil
@@ -168,6 +169,51 @@ def run_setup(context, sdk_id, install_root, names, *, check=False):
     return context.run(['pwsh','-NoLogo','-NoProfile','-Command',command],timeout=3600)
 
 
+def activate(context, path, manifest, **details):
+    """Commit both active pointers and the durable job receipt in one transaction."""
+    from .process import Cancelled
+    context.phase('Activating the verified SDK environment')
+    result = dict(details, active=manifest['id'], sdk_id=manifest['sdk_id'], activation_committed=True)
+    with context.store.connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        job = db.execute('SELECT cancel,result FROM jobs WHERE id=?', (context.job['id'],)).fetchone()
+        if job['cancel']:
+            raise Cancelled('Job cancelled before SDK activation.')
+        result = dict(json.loads(job['result']), **result)
+        result['progress'] = {'stage':'completed', 'message':'SDK '+sdk_packages.get(context.store, manifest['sdk_id'])['manifest']['sdk_version']+' is active.',
+                              'percent':100, 'indeterminate':False, 'scope':None, 'downloaded_bytes':None, 'total_bytes':None}
+        db.executemany('INSERT INTO kv VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                       [('active_toolset',json.dumps(manifest['id'])),('active_sdk',json.dumps(manifest['sdk_id']))])
+        db.execute('UPDATE jobs SET result=?,phase=? WHERE id=?', (json.dumps(result),result['progress']['message'],context.job['id']))
+    context.activation_committed = True
+    try:
+        refresh_profiles(context)
+    except Exception as error:
+        context.log('SDK activated; repository profile refresh can be retried: '+str(error))
+    return result
+
+
+def reuse_tools(context, package, install_root, names):
+    """Reuse only tools that the unchanged SDK owner accepts; leave active roots intact."""
+    locations = {'zig':'Toolchains/Zig','rust':'Toolchains/Rust','limine':'Boot/Limine','qemu':'Emulation/QEMU'}
+    candidates = sorted((context.store.root/'BuildTools/Toolsets').glob('*/toolset.json'), key=lambda p:p.stat().st_mtime, reverse=True)
+    for name in names:
+        target = install_root/locations[name]
+        for file in candidates:
+            try:
+                old = sdk_packages.strict_json(file.read_bytes())
+                source = file.parent/'Install'/locations[name]
+                if old.get('schema') != 2 or old.get('sdk_id') != package['id'] or not source.is_dir():
+                    continue
+                context.phase('Checking reusable SDK tool: '+name)
+                run_setup(context, package['id'], file.parent/'Install', [name], check=True)
+            except (OSError, ValueError, RuntimeError):
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.symlink_to(os.path.relpath(source, target.parent), target_is_directory=True)
+            break
+
+
 def install(context, value):
     if not isinstance(value, dict) or not value.get('sdk_id') or set(value)-{'sdk_id','tools'}:
         raise ValueError('Choose a verified sdk_id and optional SDK tool IDs.')
@@ -180,25 +226,30 @@ def install(context, value):
     if any(name not in ('zig','rust','limine','qemu') for name in names):
         raise ValueError('This SDK tool is provisioned by its native owner builder, not Tools/Setup.ps1.')
     key = 'sdk-'+package['id']+'-'+platform.system().lower()
-    path = under(store.root/'BuildTools/Toolsets', key);path.mkdir(parents=True, exist_ok=True)
+    path = under(store.root/'BuildTools/Toolsets', key)
     manifest_path = path/'toolset.json'
     previous = sdk_packages.strict_json(manifest_path.read_bytes()) if manifest_path.exists() else {}
     if previous.get('status') == 'ready' and set(names).issubset(previous['installed_tools']):
-        validate(context,path,previous)
-        with store.connect() as db:
-            db.executemany('INSERT INTO kv VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
-                           [('active_toolset',json.dumps(key)),('active_sdk',json.dumps(package['id']))])
-        refresh_profiles(context)
-        return {'active':key,'sdk_id':package['id'],'unchanged':True}
+        try:
+            validate(context,path,previous)
+        except (OSError, ValueError, RuntimeError):
+            context.phase('Preparing a separate replacement for the incomplete SDK environment')
+        else:
+            return activate(context,path,previous,unchanged=True)
     if previous.get('status')=='ready':names=sorted(set(names)|set(previous['installed_tools']))
-    paths = package_paths(store, {'sdk_id':package['id']})
+    if path.exists():
+        key += '-'+uuid.uuid4().hex[:12]
+        path = under(store.root/'BuildTools/Toolsets', key)
+    path.mkdir(parents=True, exist_ok=False)
+    manifest_path = path/'toolset.json'
     manifest = {'schema':2,'id':key,'status':'installing','sdk_id':package['id'],
                 'sdk_profile_sources':sdk_packages.provenance(package)['profile_sources'],'created':now(),
                 'installed_tools':names,'versions':{},'sources':{'SDK':{'repository':'r4os-sdk','version':package['manifest']['sdk_version'],
                 'commit':package['manifest']['sdk_source']['commit']}}}
-    if previous.get("status") != "ready":write_json(manifest_path,manifest)
+    write_json(manifest_path,manifest)
     try:
         sdk_packages.verify(context,package['id'])
+        reuse_tools(context, package, path/'Install', names)
         context.phase('Installing the exact tools declared by the SDK')
         run_setup(context, package['id'], path/'Install', names)
         manifest['versions']={name:package['manifest']['tools'][name].get('version') or package['manifest']['tools'][name].get('rust_version') for name in names}
@@ -210,14 +261,9 @@ def install(context, value):
         write_json(manifest_path,manifest)
         validate(context,path,manifest)
         manifest['status']='ready';write_json(manifest_path,manifest);context.check()
-        with store.connect() as db:
-            db.executemany('INSERT INTO kv VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
-                           [('active_toolset',json.dumps(key)),('active_sdk',json.dumps(package['id']))])
-        refresh_profiles(context)
-        return {'active':key,'sdk_id':package['id'],'versions':manifest['versions']}
+        return activate(context,path,manifest,versions=manifest['versions'])
     except BaseException as error:
-        if previous.get('status')=='ready':write_json(manifest_path,previous)
-        elif store.setting('active_toolset') != key:
+        if store.setting('active_toolset') != key:
             manifest.update(status='failed',error=str(error)[-4000:]);write_json(manifest_path,manifest)
         raise
 
@@ -228,8 +274,7 @@ def perform(context, action, payload):
     if action == 'activate':
         if not isinstance(payload,dict) or set(payload) != {'id'}: raise ValueError('Choose an installed SDK environment.')
         path,manifest=load(context.store,payload['id']);validate(context,path,manifest)
-        context.store.set('active_toolset',manifest['id']);context.store.set('active_sdk',manifest['sdk_id']);refresh_profiles(context)
-        return {'active':manifest['id'],'sdk_id':manifest['sdk_id']}
+        return activate(context,path,manifest)
     if action == 'check':
         path,manifest=active(context.store);return validate(context,path,manifest)
     raise ValueError('Unknown SDK tool action.')

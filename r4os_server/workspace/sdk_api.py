@@ -45,6 +45,9 @@ def dispatch(handler):
     parts = [unquote(value) for value in path.removeprefix('/api/sdk/').split('/') if value]
     read = handler.command in ('GET','HEAD')
     try:
+        if parts == ['selection'] and handler.command == 'POST':
+            from .sdk_install import request
+            return handler.json(202, store.enqueue('sdk_select', 'sdk', request(data(handler))))
         if parts == ['releases'] and read:
             from .sdk_catalog import overview
             query = parse_qs(urlsplit(handler.path).query)

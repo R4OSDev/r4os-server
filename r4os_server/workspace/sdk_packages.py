@@ -101,11 +101,20 @@ def fetch(context, url, path, *, expected=None, size=None, limit=2*1024**3):
     request = urllib.request.Request(url, headers={'User-Agent': 'R4OS-Server'})
     try:
         with urllib.request.urlopen(request, timeout=45) as response, temporary.open('wb') as output:
-            total = 0
+            total, last = 0, 0
+            expected_size = size
+            if expected_size is None:
+                try: expected_size = int(response.headers.get('Content-Length', '0')) or None
+                except (ValueError, TypeError): pass
+            context.progress('downloading', 'Downloading SDK asset: '+path.name, downloaded=0, total=expected_size, scope=path.name)
             while chunk := response.read(1024*1024):
                 context.check();total += len(chunk)
                 if total > (size if size is not None else limit): raise ValueError('SDK asset exceeds its declared size: '+path.name)
                 output.write(chunk)
+                if time.monotonic()-last > .5:
+                    context.progress('downloading', 'Downloading SDK asset: '+path.name, downloaded=total, total=expected_size, scope=path.name)
+                    last = time.monotonic()
+            context.progress('downloading', 'Downloaded SDK asset: '+path.name, downloaded=total, total=expected_size, scope=path.name)
         if size is not None and total != size: raise ValueError('SDK asset length differs: '+path.name)
         if expected and digest(temporary) != expected: raise ValueError('SDK asset SHA256 differs: '+path.name)
         temporary.replace(path)
@@ -261,6 +270,7 @@ def import_release(context, value):
             payload = folder/'Payload';payload.mkdir(parents=True, exist_ok=True)
             for name, entry in entries.items():
                 fetch(context, base+quote(name), payload/name, expected=entry['sha256'], size=entry['bytes'])
+            context.phase('Unpacking the SDK and its bound components')
             content = folder/'Content'
             if content.exists(): shutil.rmtree(content)
             content.mkdir()

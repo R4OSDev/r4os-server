@@ -18,6 +18,9 @@ def execute(context):
     kind, subject, payload = job["kind"], job["subject"], job["payload"]
     if kind.startswith('sdk_'):
         from . import sdk_packages
+        if kind == 'sdk_select':
+            from .sdk_install import select
+            return select(context, payload)
         if kind == 'sdk_release_link':
             from .sdk_releases import attach
             return attach(context,payload)
@@ -110,7 +113,7 @@ def once(store):
     try:
         context.phase("Job started")
         result = execute(context) or {}
-        if not result.get('github_release', {}).get('published'):
+        if not result.get('github_release', {}).get('published') and not result.get('activation_committed'):
             context.check()
         store.change_job(job["id"], status="completed", phase="Completed", result=result, finished=now())
         context.log("Result: completed")

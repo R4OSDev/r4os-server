@@ -48,13 +48,48 @@ class Context:
 
     def phase(self, value):
         self.check()
-        self.store.change_job(self.job["id"], phase=value)
+        if self.job['kind'] == 'sdk_select':
+            self.progress('working', value)
+        else:
+            self.store.change_job(self.job["id"], phase=scrub(value))
         self.store.set("worker", {"heartbeat": time.time(), "job": self.job["id"]})
         self.log(now() + "  " + value)
 
     def check(self):
+        if getattr(self, 'activation_committed', False):
+            return
         if self.store.job(self.job["id"])["cancel"]:
             raise Cancelled("Job cancelled.")
+
+    def progress(self, stage, message, *, downloaded=None, total=None, percent=None, scope=None):
+        if self.job['kind'] != 'sdk_select':
+            return
+        self.check()
+        message = scrub(re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', str(message)))
+        message = ' '.join(message.split())[:1000]
+        if total and downloaded is not None:
+            percent = min(100, max(0, downloaded*100/total))
+        progress = {'stage': stage, 'message': message, 'scope': scope,
+                    'downloaded_bytes': downloaded, 'total_bytes': total,
+                    'percent': percent, 'indeterminate': percent is None}
+        result = self.store.job(self.job['id'])['result']
+        result['progress'] = progress
+        self.store.change_job(self.job['id'], phase=message, result=result)
+        self.store.set('worker', {'heartbeat': time.time(), 'job': self.job['id']})
+
+    def tool_output(self, text):
+        if self.job['kind'] != 'sdk_select' or time.monotonic()-getattr(self, '_last_output', 0) < .5:
+            return
+        text = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', text)
+        # curl's own progress meter is measurable, unlike a generic setup phase.
+        measured = re.findall(r'#+[^\r\n]*?\b(\d{1,3}\.\d+)%', text)
+        if measured:
+            self.progress('downloading', 'Downloading SDK tool archive', percent=min(100, float(measured[-1])), scope='Current tool archive')
+        else:
+            lines = [line.strip() for line in text.splitlines() if line.strip() and line.strip()[0] not in '{}"#']
+            if lines:
+                self.progress('setup', lines[-1])
+        self._last_output = time.monotonic()
 
     def run(self, arguments, cwd=None, *, env=None, timeout=3600, check=True, quiet=False):
         self.check()
@@ -88,6 +123,7 @@ class Context:
                     text = chunk.decode("utf-8", "replace")
                     if not quiet:
                         self.log(text)
+                        self.tool_output(text)
                     if size < 8 * 1024**2:
                         output.append(text)
                         size += len(chunk)

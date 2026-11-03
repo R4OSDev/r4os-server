@@ -9,6 +9,7 @@ import uuid
 from urllib.parse import urlsplit
 
 ACTIVE = ("queued", "running")
+SDK_MUTATIONS = ('sdk_select', 'sdk_import', 'sdk_cleanup', 'tools_install', 'tools_update', 'tools_activate')
 FOLDERS = ("Repositories", "BuildTools", "Artifacts", "Release")
 REPOSITORY_FIELDS = ("r.*,c.status AS connection_status,c.revision AS connection_revision,c.has_token AS connection_has_token,c.catalog AS connection_catalog,"
                      "COALESCE((SELECT published FROM apps WHERE repository_name=r.name),0) AS app_published,"
@@ -210,6 +211,13 @@ class Store:
                 db.execute("BEGIN IMMEDIATE")
                 return self.enqueue(kind, subject, payload, connection=db)
         db = connection
+        if kind in SDK_MUTATIONS:
+            placeholders = ','.join('?' for _ in SDK_MUTATIONS)
+            pending = db.execute("SELECT * FROM jobs WHERE kind IN ("+placeholders+") AND status IN ('queued','running') ORDER BY created,rowid LIMIT 1", SDK_MUTATIONS).fetchone()
+            if pending:
+                if pending['kind'] == kind and pending['subject'] == subject and json.loads(pending['payload']) == payload and not pending['cancel']:
+                    return self.job_record(pending)
+                raise Conflict('Another SDK preparation or activation is already queued or running: '+pending['id'])
         layout = db.execute("SELECT value FROM kv WHERE key='repository_layout'").fetchone()
         if layout and json.loads(layout[0]).get("status") != "ready":
             raise Conflict("Repository directory migration is incomplete. Check the worker before starting new jobs.")
@@ -335,7 +343,7 @@ class Store:
                 raise ValueError("Job not found.")
             if row["status"] == "queued":
                 db.execute("UPDATE jobs SET status='cancelled',cancel=1,finished=? WHERE id=?", (now(), key))
-            elif row["status"] == "running":
+            elif row["status"] == "running" and not json.loads(row['result']).get('activation_committed'):
                 db.execute("UPDATE jobs SET cancel=1 WHERE id=?", (key,))
             return self.job_record(db.execute("SELECT * FROM jobs WHERE id=?", (key,)).fetchone())
 
@@ -361,6 +369,7 @@ class Store:
 
     def recover(self):
         with self.connect() as db:
+            db.execute("UPDATE jobs SET status='completed',finished=?,phase='Completed' WHERE status='running' AND json_extract(result,'$.activation_committed')=1", (now(),))
             db.execute("UPDATE jobs SET status='completed',finished=?,phase='Completed' WHERE status='running' AND kind='build_publish' AND json_extract(result,'$.github_release.published')=1", (now(),))
             db.execute("UPDATE jobs SET status='interrupted',finished=?,error=? WHERE status='running'",
                        (now(), "The worker stopped. The job can be started again."))
