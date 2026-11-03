@@ -5,9 +5,9 @@
   let filter='',category='',account='',lastState=null,dialogJob=null,dialogOffset=0,dialogText='',dialogGeneration=0,dialogTrigger=null;
   const active=job=>['queued','running'].includes(job.status);
   const status=value=>'<span class="badge">'+E(states[value]||value||'Unknown')+'</span>';
-  const button=(label,action,name='',disabled=false,primary=false,title='')=>'<button type="button" class="button '+(primary?'primary':'subtle')+'" data-repo-action="'+E(action)+'" data-name="'+E(name)+'"'+(disabled?' disabled':'')+(title?' title="'+E(title)+'"':'')+'>'+E(label)+'</button>';
+  const button=(label,action,name='',disabled=false,primary=false,title='')=>'<button type="button" class="button '+(primary?'primary':'subtle')+'" data-repo-action="'+E(action)+'" data-name="'+E(name)+'"'+(disabled?' disabled':'')+(title?' title="'+E(title)+'"':'')+'>'+(action==='catalog'?U.refreshIcon:'')+E(label)+'</button>';
   async function refreshPage(ctx){
-    const focused=document.activeElement,content=document.querySelector('#content-area'),scroll=content?.scrollTop||0;
+    const focused=document.activeElement,scroll=U.scrollContainer().scrollTop;
     let selector=focused?.id?'#'+CSS.escape(focused.id):focused?.dataset.repoAction?'[data-repo-action="'+CSS.escape(focused.dataset.repoAction)+'"][data-name="'+CSS.escape(focused.dataset.name||'')+'"]':null;
     if(!selector&&focused?.closest('form')?.id&&focused.type==='submit')selector='#'+CSS.escape(focused.closest('form').id)+' [type="submit"]';
     const start=focused?.selectionStart,end=focused?.selectionEnd;
@@ -16,7 +16,7 @@
     const replacement=selector?document.querySelector(selector):null;
     replacement?.focus({preventScroll:true});
     if(typeof start==='number'&&replacement?.setSelectionRange)replacement.setSelectionRange(start,end);
-    if(content)content.scrollTop=scroll;
+    U.scrollContainer().scrollTop=scroll;
   }
   function pollOverview(ctx){
     U.poll=setTimeout(()=>{
@@ -65,8 +65,8 @@
     const repositoryBusy=jobs.some(job=>['catalog','check','download','download_all','update','update_all','connection_delete'].includes(job.kind));
     const canDownload=repos.some(repo=>repo.available&&!repo.local.commit&&!['empty','conflict'].includes(repo.local.status));
     const updates=state.update_count||0;
-    const actions=button('Download all','download_all','',repositoryBusy||!canDownload)+button('Update All ('+U.count(updates)+')','update_all','',repositoryBusy||!updates,!!updates)+button('Refresh','catalog','',repositoryBusy);
-    U.page(ctx,'Repositories','',html,actions,false);
+    const actions=button('Download all','download_all','',repositoryBusy||!canDownload)+button('Update All ('+U.count(updates)+')','update_all','',repositoryBusy||!updates,!!updates);
+    U.page(ctx,'Repositories','',html,actions,button('Refresh','catalog','',repositoryBusy));
     U.status(jobs.some(job=>job.kind==='catalog')?'Refreshing repositories…':'Repositories loaded.');
     applyFilter();
     if(ctx.leaf)await details(ctx.leaf);

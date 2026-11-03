@@ -21,9 +21,13 @@ window.R4 = (() => {
   ui.table = (headers,rows) => '<div class="table-scroll"><table><thead><tr>'+headers.map(v=>'<th>'+esc(v)+'</th>').join('')+'</tr></thead><tbody>'+rows.map(row=>'<tr>'+row.map(v=>'<td>'+v+'</td>').join('')+'</tr>').join('')+'</tbody></table></div>';
   ui.card = (label,value,note='') => '<div class="metric-card"><span>'+esc(label)+'</span><strong>'+esc(value)+'</strong><small>'+esc(note)+'</small></div>';
   ui.show = (ctx,html) => {if(ctx.generation===ui.generation) content.innerHTML=html;};
+  ui.scrollContainer = () => content.querySelector('.page-scroll') || content;
+  ui.refreshIcon = '<svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-refresh"/></svg>';
   ui.page = (ctx,title,description,html,actions='',refresh=true) => {
-    const buttons=actions+(refresh?'<button type="button" class="button subtle" data-action="refresh">Refresh</button>':'');
-    ui.show(ctx,'<section class="feature-page" aria-label="'+esc(title)+'">'+(buttons?'<header class="page-heading"><div class="page-actions">'+buttons+'</div></header>':'')+html+'</section>');
+    // A supplied refresh button keeps page-specific actions such as catalogue refresh.
+    const refreshButton=typeof refresh==='string'?refresh:refresh?'<button type="button" class="button subtle" data-action="refresh">'+ui.refreshIcon+'<span>Refresh</span></button>':'';
+    const toolbar=refreshButton||actions?'<header class="page-toolbar"><div class="page-toolbar-inner" role="toolbar" aria-label="Page actions">'+(refreshButton?'<div class="page-refresh">'+refreshButton+'</div>':'')+(actions?'<div class="page-actions">'+actions+'</div>':'')+'</div></header>':'';
+    ui.show(ctx,toolbar+'<div class="page-scroll" role="region" aria-label="'+esc(title||'Page')+' content" tabindex="0"><section class="feature-page">'+html+'</section></div>');
   };
   ui.side = (ctx,items) => {
     document.querySelector('.submenu-column').innerHTML='<p class="column-caption">'+esc(ctx.view==='apps'?'Apps':ctx.view==='updates'?'Update Center':ctx.view==='benchmarks'?'Benchmarks':ctx.view==='repositories'?'Repositories':'Settings')+'</p><nav class="secondary-navigation">'+items.map(([id,label])=>'<a class="sub-item" href="#'+ctx.view+'/'+id+'"'+(ctx.sub===id?' aria-current="page"':'')+'>'+esc(label)+'</a>').join('')+'</nav>';
