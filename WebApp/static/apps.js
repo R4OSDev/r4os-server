@@ -6,9 +6,9 @@
     U.side(ctx,[['overview','Overview']]);
     const value=await api('overview');if(ctx.generation!==U.generation)return;
     const rows=value.apps.map(app=>U.record(
-      '<div class="record-grid"><div class="record-identity"><h2 class="record-name app-name">'+E(app.display_name)+'</h2><span class="record-subline app-version">Version '+E(app.version)+'</span>'+(app.description?'<p class="app-description">'+E(app.description)+'</p>':'')+'</div>'+
+      '<div class="record-grid app-overview-grid"><div class="record-identity"><h2 class="record-name app-name">'+E(app.display_name)+'</h2><span class="record-subline app-version">Version '+E(app.version)+'</span>'+(app.description?'<p class="app-description">'+E(app.description)+'</p>':'')+'</div>'+
       '<div role="group" aria-label="Install-Path"><span class="app-install-path">'+E(app.install_path)+'</span></div>'+
-      '<div role="group" aria-label="Source">'+E(app.owner)+'<small class="cell-subline">'+E(app.repository_name)+'</small>'+(app.private?'<span class="badge">Private</span>':'')+(!app.source_available?'<p class="muted">'+E(app.source_error||'Source unavailable')+'</p>':'')+'</div></div>',
+      '<div role="group" aria-label="Source">'+E(app.owner)+'<small class="cell-subline">'+E(app.repository_name)+'</small>'+(!app.source_available?'<p class="muted">'+E(app.source_error||'Source unavailable')+'</p>':'')+'</div><span class="badge app-visibility" title="Source repository visibility">'+(app.private?'Private':'Public')+'</span></div>',
       '<button type="button" class="button subtle" data-edit-app="'+E(app.repository)+'" aria-label="Edit '+E(app.display_name)+'">Edit</button>',
       ' data-app-repository="'+E(app.repository)+'"'
     ));

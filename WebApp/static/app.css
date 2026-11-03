@@ -256,6 +256,8 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 .record { min-width: 0; overflow: hidden; border: 1px solid #44564b; border-radius: 8px; background: #171e22; }
 .record-content { min-width: 0; padding: 18px; overflow-wrap: anywhere; }
 .record-grid { display: grid; grid-template-columns: minmax(0,1.15fr) minmax(0,1fr) minmax(0,.9fr); gap: 18px; align-items: start; }
+.record-grid.app-overview-grid { grid-template-columns: minmax(0,1.15fr) minmax(0,1fr) minmax(0,.9fr) max-content; }
+.app-visibility { grid-column: 4; grid-row: 1; justify-self: end; align-self: start; }
 .record-grid > *,.record-head > * { min-width: 0; }
 .record-name { display: block; margin: 0; color: #dce6df; font-size: 16px; font-weight: 600; line-height: 1.5; overflow-wrap: anywhere; }
 .record-name.text-button { color: #b1ddc4; }
@@ -383,6 +385,9 @@ progress { display: block; width: 100%; height: 8px; accent-color: #91caaa; marg
   .page-toolbar-inner { padding-inline: 20px; }
   .record-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .record-grid > .record-identity { grid-column: 1/-1; }
+  .record-grid.app-overview-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+  .app-overview-grid > .record-identity { grid-column: 1; }
+  .app-visibility { grid-column: 2; }
   .metric-grid { gap: 8px; }
   .metric-card { padding: 15px; }
   .metric-card > strong { font-size: 22px; }
@@ -412,6 +417,8 @@ progress { display: block; width: 100%; height: 8px; accent-color: #91caaa; marg
   .feature-page { padding: 16px 12px 28px; }
   .record-content { padding: 14px; }
   .record-grid { grid-template-columns: minmax(0,1fr); gap: 14px; }
+  .record-grid.app-overview-grid { grid-template-columns: minmax(0,1fr) max-content; }
+  .app-overview-grid > div:not(.record-identity) { grid-column: 1/-1; }
   .record-fields { grid-template-columns: minmax(0,1fr); }
   .record-actions { padding: 10px 14px; }
 }
