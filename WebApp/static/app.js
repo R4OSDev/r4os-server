@@ -78,16 +78,16 @@ window.R4 = (() => {
     }
   };
   let checking=false,connected=false;
+  const connectionError='Connection to the WebApp was interrupted. Retrying automatically.';
   ui.check = async () => {
     if(checking)return;checking=true;
     try {
       const value=await ui.api('status');
       if(value.status!=='ok')throw new Error();
       document.querySelector('#connection').dataset.state='connected';document.querySelector('#connection-label').textContent='Connected';document.querySelector('#version').textContent='v'+value.version;
-      const indicator=document.querySelector('#service-indicators');
-      if(indicator)indicator.innerHTML=Object.entries(value.services||{}).map(([name,state])=>'<span class="service-dot '+esc(state)+'" title="'+esc((name==='updates'?'Updates':'Benchmarks')+': '+(state==='ok'?'ready':state==='pending'?'pending':'unavailable'))+'" aria-label="'+esc(name+' '+state)+'"></span>').join('');
-      if(!connected && !document.querySelector('#status-message').classList.contains('is-error'))ui.status('Connected.');connected=true;
-    } catch {connected=false;document.querySelector('#connection').dataset.state='error';document.querySelector('#connection-label').textContent='Disconnected';ui.status('Connection to the WebApp was interrupted. Retrying automatically.',true);}
+      const message=document.querySelector('#status-message');
+      if(!connected && (!message.classList.contains('is-error')||message.textContent===connectionError))ui.status('Connected.');connected=true;
+    } catch {connected=false;document.querySelector('#connection').dataset.state='error';document.querySelector('#connection-label').textContent='Disconnected';ui.status(connectionError,true);}
     finally {checking=false;}
   };
   document.addEventListener('click',async event=>{
