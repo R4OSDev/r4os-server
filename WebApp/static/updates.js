@@ -5,9 +5,10 @@
   let uploadOffset=0,lastFilter='';
   const kind = value => value==='manifest'?'Release manifest':'Package';
   const title = item => item.metadata?.title || item.filename || kind(item.kind)+' · '+item.id.slice(0,8);
-  const row = item => ['<button class="text-button" data-update-id="'+E(item.id)+'">'+E(title(item))+'</button><small class="cell-subline">'+E(item.filename || item.id)+'</small>',E(kind(item.kind)),U.badge(item.status),E(item.metadata?.release || '—'),E(U.bytes(item.size)),E(U.date(item.created_at))];
-  const incoming = items => items.length?U.table(['Incoming','Type','Validation status','Release','Size','Received'],items.map(row)):U.empty('No uploads yet','Uploaded packages and release manifests appear here with their validation status.');
+  const row = item => U.record('<h2 class="record-name">'+E(title(item))+'</h2><span class="record-subline">Release '+E(item.metadata?.release || '—')+'</span><p class="record-description">'+E(item.filename || item.id)+'</p>'+U.fields([['Type',E(kind(item.kind))],['Validation',U.badge(item.status)],['Size',E(U.bytes(item.size))],['Received',E(U.date(item.created_at))]]),'<button type="button" class="button subtle" data-update-id="'+E(item.id)+'">Details</button>');
+  const incoming = items => items.length?U.records(items.map(row),'Incoming uploads'):U.empty('No uploads yet','Uploaded packages and release manifests appear here with their validation status.');
   const panel = (title,body) => '<section class="panel"><div class="panel-heading"><h2>'+E(title)+'</h2></div>'+body+'</section>';
+  const recordsPanel = (title,body) => '<section class="record-section"><div class="panel-heading"><h2>'+E(title)+'</h2></div>'+body+'</section>';
   const entries = [['overview','Overview'],['incoming','Incoming'],['released','Published'],['catalog','Catalogue'],['audit','Log']];
   const selected = (ctx,items) => items.filter(item=>ctx.leaf==='packages'?item.kind==='package':ctx.leaf==='manifests'?item.kind==='manifest':true);
   const released = state => [...state.released.map(item=>({...item,kind:'package'})),...state.released_manifests.map(item=>({...item,kind:'manifest'}))];
@@ -22,37 +23,37 @@
     if(ctx.sub==='overview'){
       const waiting=Object.entries(state.upload_counts).filter(([name])=>name!=='published').reduce((sum,[,count])=>sum+count,0);
       body='<div class="metric-grid">'+U.card('Incoming',U.count(waiting),'Not published yet')+U.card('Packages',U.count(state.released.length),'Published, immutable')+U.card('Current release',latest?.release || '—',latest?'Complete in catalogue':'No target release yet')+'</div>';
-      body+=panel('Recent uploads',incoming(items.slice(0,6)));
+      body+=recordsPanel('Recent uploads',incoming(items.slice(0,6)));
     } else if(ctx.sub==='incoming'){
       name='Incoming';description='Transfer and content validation are separate steps.';
       const filter=ctx.leaf||'all';if(filter!==lastFilter){uploadOffset=0;lastFilter=filter;}
       const query=new URLSearchParams({limit:'50',offset:String(uploadOffset),exclude_published:'true'});
       if(filter==='packages' || filter==='manifests')query.set('kind',filter==='packages'?'package':'manifest');
       const page=await U.api('updates/uploads?'+query);if(ctx.generation!==U.generation)return;
-      body=panel('New upload',uploadForm())+panel('Packages and manifests',incoming(page.items)+'<div class="pagination"><span>'+E(U.count(page.total))+' uploads</span><div><button class="button subtle" data-update-page="previous"'+(uploadOffset===0?' disabled':'')+'>Previous</button><button class="button subtle" data-update-page="next"'+(uploadOffset+page.items.length>=page.total?' disabled':'')+'>Next</button></div></div>');
+      body=panel('New upload',uploadForm())+recordsPanel('Packages and manifests',incoming(page.items)+'<div class="pagination"><span>'+E(U.count(page.total))+' uploads</span><div><button class="button subtle" data-update-page="previous"'+(uploadOffset===0?' disabled':'')+'>Previous</button><button class="button subtle" data-update-page="next"'+(uploadOffset+page.items.length>=page.total?' disabled':'')+'>Next</button></div></div>');
       if(page.items.some(item=>['queued','validating','receiving'].includes(item.status)))schedule(ctx);
     } else if(ctx.sub==='released'){
       name='Published';description='Published files remain unchanged.';
       const files=selected(ctx,released(state));
-      body=panel('Published files',files.length?U.table(['File','Type','Release','Size','Status'],files.map(item=>['<button class="text-button" data-released-file="'+E(item.filename)+'">'+E(item.metadata?.title || item.filename)+'</button><small class="cell-subline">'+E(item.filename)+'</small>',E(kind(item.kind)),E(item.metadata?.release || '—'),E(U.bytes(item.size)),U.badge(item.valid?'published':'invalid')])):U.empty('No publications yet','Valid uploads can be published after validation.'));
+      body=recordsPanel('Published files',files.length?U.records(files.map(item=>U.record('<h2 class="record-name">'+E(item.metadata?.title || item.filename)+'</h2><span class="record-subline">Release '+E(item.metadata?.release || '—')+'</span><p class="record-description">'+E(item.filename)+'</p>'+U.fields([['Type',E(kind(item.kind))],['Size',E(U.bytes(item.size))],['Publication',U.badge(item.valid?'published':'invalid')]]),'<button type="button" class="button subtle" data-released-file="'+E(item.filename)+'">Details</button>')),'Published files'):U.empty('No publications yet','Valid uploads can be published after validation.'));
     } else if(ctx.sub==='catalog'){
       name='Catalogue';description='Clients receive the highest fully published release.';
       if(!latest)body=panel('Target release',U.empty('No published release yet','Publish the packages first, then their release manifest.'));
       else {
         body='<div class="metric-grid">'+U.card('Release',latest.release)+U.card('Packages',U.count(latest.packages.length))+U.card('Catalogue',state.catalog.schema,'Schema')+'</div>';
-        body+=panel('Installation order',U.table(['Order','Package','Version','Activation','Size'],latest.packages.map(item=>[E(item.install_order+1),'<button class="text-button" data-released-file="'+E(item.filename)+'">'+E(item.title)+'</button><small class="cell-subline">'+E(item.id)+'</small>',E(item.package_version),E(item.activation),E(U.bytes(item.size))])));
-        body+=U.fold('Profilees and target components',latest.manifest.profiles);
+        body+=recordsPanel('Installation order',U.records(latest.packages.map(item=>U.record('<h2 class="record-name">'+E(item.title)+'</h2><span class="record-subline">Version '+E(item.package_version)+'</span><p class="record-description">'+E(item.filename)+'</p>'+U.fields([['Install order',E(item.install_order+1)],['Activation',E(item.activation)],['Size',E(U.bytes(item.size))],['Package ID',E(item.id)]]),'<button type="button" class="button subtle" data-released-file="'+E(item.filename)+'">Details</button>')),'Installation order'));
+        body+=U.fold('Profiles and target components',latest.manifest.profiles);
       }
       if(state.catalog_errors.length)body+=panel('Releases unavailable for delivery',U.raw(state.catalog_errors));
     } else if(ctx.sub==='audit'){
       name='Log';description='Update service transfers, validations and publications.';
-      body=panel('Recent events',state.audit.length?U.table(['Time','Event','Source','Details'],state.audit.map(item=>[E(U.date(item.created_at)),E(eventLabels[item.event] || item.event),E(item.ip || '—'),E(item.note)])):U.empty('No events yet','The first transfers and publications will appear here.'));
+      body=recordsPanel('Recent events',state.audit.length?U.records(state.audit.map(item=>U.record('<h2 class="record-name">'+E(eventLabels[item.event] || item.event)+'</h2><span class="record-subline">'+E(U.date(item.created_at))+'</span><p class="record-description">'+E(item.note)+'</p>'+U.fields([['Source',E(item.ip || '—')]]))),'Update events'):U.empty('No events yet','The first transfers and publications will appear here.'));
     }
     U.page(ctx,name,description,body,ctx.sub!=='incoming'?'<a class="button primary" href="#updates/incoming">Upload</a>':'');
     U.status('Update inventory loaded.');
   };
 
-  function schedule(ctx){U.poll=setTimeout(()=>{if(ctx.generation!==U.generation)return;if(U.busy || document.querySelector('#detail-dialog')?.open)schedule(ctx);else U.navigate();},1500);}
+  function schedule(ctx){U.poll=setTimeout(async()=>{if(ctx.generation!==U.generation)return;if(U.busy || document.querySelector('#detail-dialog')?.open)schedule(ctx);else {const scroll=U.scrollContainer().scrollTop;await U.navigate();if(U.current.view===ctx.view&&U.current.sub===ctx.sub&&U.current.leaf===ctx.leaf)U.scrollContainer().scrollTop=scroll;}},1500);}
   function uploadForm(){return '<form id="update-upload" class="panel-body"><p class="muted form-intro">Packages and original release manifests are validated after transfer. Publication is a separate step.</p><div class="form-grid"><label>File type<select name="kind" id="upload-kind"><option value="package">Update package (.R4U)</option><option value="manifest">Release manifest (.JSON)</option></select></label><label>File<input id="update-file" name="file" type="file" accept=".R4U,.r4u" required></label></div><div class="form-actions"><button class="button primary" type="submit">Upload</button><button class="button danger" id="cancel-upload" type="button" hidden>Cancel</button><span id="upload-caption" class="muted"></span></div><progress id="upload-progress" max="100" value="0" hidden></progress><p id="upload-error" class="form-message" role="alert"></p></form>';}
 
   const details = item => {
