@@ -558,9 +558,14 @@ sys.exit(result.returncode)
 
     def test_logs_filter_before_limit_and_configuration_assignment_is_atomic(self):
         old = self.store.enqueue("tools_check", "tools")
+        sdk = self.store.enqueue("sdk_verify", "sdk")
         for index in range(55):
             self.store.enqueue("check", str(index))
-        self.assertEqual([job["id"] for job in self.store.jobs(category="tools")], [old["id"]])
+        self.assertEqual([job["id"] for job in self.store.jobs(category="tools")], [sdk["id"], old["id"]])
+        self.assertEqual(self.store.job_count(category="tools"), 2)
+        self.assertEqual([job["id"] for job in self.store.jobs(category="tools", limit=1, offset=1)], [old["id"]])
+        self.assertEqual([job["id"] for job in self.store.jobs("tools", category="tools")], [old["id"]])
+        self.assertEqual(self.store.job_count("sdk", category="tools"), 1)
         self.assertEqual(self.store.job_count(category="repositories"), 55)
         self.assertEqual(len(self.store.jobs(category="repositories", limit=50, offset=50)), 5)
         config = testconfigs.save(self.store, {"name": "Concurrent"})

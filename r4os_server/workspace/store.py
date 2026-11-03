@@ -303,7 +303,7 @@ class Store:
             clauses.append("subject=?")
             args.append(subject)
         categories = {"all": "", "repositories": "kind IN ('catalog','download','update','download_all','update_all','check','connection_delete')",
-                      "tools": "kind GLOB 'tools_*'", "builds": "kind IN ('build','build_publish')", "releases": "kind='release'"}
+                      "tools": "(kind GLOB 'tools_*' OR kind GLOB 'sdk_*')", "builds": "kind IN ('build','build_publish')", "releases": "kind='release'"}
         if category not in categories:
             raise ValueError("Unknown log category.")
         if categories[category]:

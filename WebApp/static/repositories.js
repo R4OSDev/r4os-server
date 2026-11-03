@@ -140,27 +140,49 @@
     if(focusCancel)document.querySelector('[data-repo-action="cancel"]')?.focus({preventScroll:true});
     if(active(job))setTimeout(()=>{if(dialogJob===id&&document.querySelector('#detail-dialog[open]'))showJob(id,false).catch(error=>U.status(error.message,true));},1500);
   }
+  function pollTools(ctx){
+    U.poll=setTimeout(()=>{
+      if(ctx.generation!==U.generation)return;
+      const focused=document.activeElement,editing=focused?.matches('input,select,textarea')&&focused.closest('.feature-page form');
+      if(document.querySelector('#detail-dialog[open],.feature-page form[data-tools-dirty]')||editing)pollTools(ctx);
+      else refreshPage(ctx).catch(error=>U.status(error.message,true));
+    },2500);
+  }
   async function tools(ctx){
+    const pages=[['sdk','SDK'],['build-environment','Build Environment'],['environments','Environments'],['development','Development'],['maintenance','Maintenance'],['jobs','Jobs']];
+    const selected=pages.some(([id])=>id===ctx.leaf)?ctx.leaf:'sdk';
+    U.context({...ctx,leaf:selected},pages);
     const value=await sdk('tools');if(ctx.generation!==U.generation)return;
+    const jobPage=selected==='jobs'?await api('jobs?category=tools&limit=30&offset=0'):null;if(ctx.generation!==U.generation)return;
     const ready=value.packages.filter(item=>item.status==='ready');
-    let html='<section class="panel panel-body"><h2>SDK packages</h2><p>The SDK selects build profiles, exact tools, Contract and system libraries. Package originals are immutable.</p><form id="sdk-import"><label>Official SDK release URL<input name="release_url" type="url" required placeholder="https://github.com/R4OSDev/r4os-sdk/releases/tag/v0.64.145"></label><button class="button primary" type="submit">Import and verify SDK</button><p class="form-message" role="alert"></p></form></section>';
-    html+='<section class="panel panel-body"><h2>Build environment</h2><p>Host: '+E(value.host)+' · Active SDK: '+E(value.sdk?.version||'Not configured')+'</p><form id="sdk-setup"><label>Verified SDK<select name="sdk_id" required>'+ready.map(item=>'<option value="'+E(item.id)+'"'+(item.id===value.sdk?.id?' selected':'')+'>'+E(item.version+' · '+item.source.commit.slice(0,12))+'</option>').join('')+'</select></label><fieldset><legend>SDK-owned setup</legend>'+['zig','rust','limine','qemu'].map(name=>'<label><input type="checkbox" name="tools" value="'+name+'"'+(['zig','rust'].includes(name)?' checked':'')+'> '+E(name)+'</label>').join('')+'</fieldset><p class="muted">Graphics, shader and platform prerequisites are verified by their native owner builders.</p><button type="submit" class="button primary"'+(!ready.length?' disabled':'')+'>Set up and activate</button> '+button('Check active environment','tools_check','',!value.active)+'<p class="form-message" role="alert"></p></form>'+U.table(['Tool','SDK requirement','Installed','State'],value.components.map(item=>[E(item.name),E(item.required),E(item.installed||'—'),E(item.state)]))+'</section>';
-    if(value.errors?.length)html+='<p class="workspace-notice">'+E(value.errors.join(' · '))+'</p>';
-    const packages=value.packages.map(item=>{
-      let content='<h2 class="record-name">SDK '+E(item.version)+'</h2><span class="record-subline">'+E(item.status)+'</span>'+(item.error?'<p class="notice error">'+E(item.error)+'</p>':'')+U.fields([['Package ID','<code>'+E(item.id)+'</code>'],['Source revision','<code>'+E(item.source.commit)+'</code>']]);
-      if(item.status==='ready'){
-        content+=U.records(Object.entries(item.profiles).map(([id,profile])=>U.record('<h3 class="record-name">'+E(id)+'</h3>'+U.fields([['Language / role',E(profile.language+' / '+profile.role)],['Tools / components',E(profile.toolset+' / '+profile.components)]]),button('Describe','sdk_describe',item.id+'|'+id)+button('Resolve','sdk_resolve',item.id+'|'+id))),'SDK profiles');
-        content+=U.fold('Tools and host variants',item.tools)+U.fold('Bound components',{sets:item.component_sets,sources:item.source_bindings,libraries:item.system_libraries})+U.fold('Original profile hashes',item.profile_sources);
-        content+=U.records(item.assets.map(asset=>U.record('<h3 class="record-name">'+E(asset.path)+'</h3>'+U.fields([['Role',E(asset.role)],['Size',E(U.bytes(asset.bytes))]]),'<a class="button subtle" href="/api/sdk/assets/'+E(item.id)+'/'+E(asset.path)+'">Download</a>')),'Original SDK assets');
-      }
-      return U.record(content,item.status==='ready'?button('Verify package','sdk_verify',item.id):'');
-    });
-    if(packages.length)html+='<section class="record-section" aria-label="SDK packages">'+U.records(packages,'SDK packages')+'</section>';
-    html+='<section class="record-section"><div class="panel-heading"><h2>Installed SDK environments</h2></div>'+U.records(value.toolsets.map(item=>U.record('<h2 class="record-name">'+E(item.id)+'</h2><span class="record-subline">'+E(item.id===value.active?'Active':item.status)+'</span>',button('Activate','tools_activate',item.id,item.id===value.active||item.status!=='ready'))),'Installed SDK environments')+'</section>';
-    html+='<section class="panel panel-body"><h2>Technical development snapshot</h2><p>An explicit snapshot pins managed SDK, Contract and Libraries sources. Changed sources make the snapshot stale. Technical builds cannot be published as qualified releases.</p><form id="sdk-development"><label>SDK<select name="sdk_id">'+ready.map(item=>'<option value="'+E(item.id)+'">'+E(item.version)+'</option>').join('')+'</select></label><label>Profile<select name="profile">'+[...new Set(ready.flatMap(item=>Object.keys(item.profiles)))].map(id=>'<option>'+E(id)+'</option>').join('')+'</select></label>'+['sdk','contract','libraries'].map(role=>'<label>'+E(role)+' repository ID<input name="'+role+'_repository" required placeholder="r4os-'+role+'"></label>').join('')+'<button class="button" type="submit">Create technical snapshot</button><p class="form-message" role="alert"></p></form></section>';
-    html+='<section class="panel panel-body"><h2>Obsolete installations</h2><p>After SDK verification, remove obsolete local build environments. Historical receipts and application data are retained.</p>'+button('Remove obsolete installations','sdk_cleanup','',!value.active)+'</section>'+jobRows(value.jobs);
+    let html='';
+    if(selected==='sdk'){
+      html='<section class="panel panel-body"><h2>SDK packages</h2><p>The SDK selects build profiles, exact tools, Contract and system libraries. Package originals are immutable.</p><form id="sdk-import"><label>Official SDK release URL<input name="release_url" type="url" required placeholder="https://github.com/R4OSDev/r4os-sdk/releases/tag/v0.64.145"></label><button class="button primary" type="submit">Import and verify SDK</button><p class="form-message" role="alert"></p></form></section>';
+      const packages=value.packages.map(item=>{
+        let content='<h2 class="record-name">SDK '+E(item.version)+'</h2><span class="record-subline">'+E(item.status)+'</span>'+(item.error?'<p class="notice error">'+E(item.error)+'</p>':'')+U.fields([['Package ID','<code>'+E(item.id)+'</code>'],['Source revision','<code>'+E(item.source.commit)+'</code>']]);
+        if(item.status==='ready'){
+          content+=U.records(Object.entries(item.profiles).map(([id,profile])=>U.record('<h3 class="record-name">'+E(id)+'</h3>'+U.fields([['Language / role',E(profile.language+' / '+profile.role)],['Tools / components',E(profile.toolset+' / '+profile.components)]]),button('Describe','sdk_describe',item.id+'|'+id)+button('Resolve','sdk_resolve',item.id+'|'+id))),'SDK profiles');
+          content+=U.fold('Tools and host variants',item.tools)+U.fold('Bound components',{sets:item.component_sets,sources:item.source_bindings,libraries:item.system_libraries})+U.fold('Original profile hashes',item.profile_sources);
+          content+=U.records(item.assets.map(asset=>U.record('<h3 class="record-name">'+E(asset.path)+'</h3>'+U.fields([['Role',E(asset.role)],['Size',E(U.bytes(asset.bytes))]]),'<a class="button subtle" href="/api/sdk/assets/'+E(item.id)+'/'+E(asset.path)+'">Download</a>')),'Original SDK assets');
+        }
+        return U.record(content,item.status==='ready'?button('Verify package','sdk_verify',item.id):'');
+      });
+      if(packages.length)html+='<section class="record-section" aria-label="SDK packages">'+U.records(packages,'SDK packages')+'</section>';
+    }else if(selected==='build-environment'){
+      html='<section class="panel panel-body"><h2>Build environment</h2><p>Host: '+E(value.host)+' · Active SDK: '+E(value.sdk?.version||'Not configured')+'</p><form id="sdk-setup"><label>Verified SDK<select name="sdk_id" required>'+ready.map(item=>'<option value="'+E(item.id)+'"'+(item.id===value.sdk?.id?' selected':'')+'>'+E(item.version+' · '+item.source.commit.slice(0,12))+'</option>').join('')+'</select></label><fieldset><legend>SDK-owned setup</legend>'+['zig','rust','limine','qemu'].map(name=>'<label class="toggle-control"><input type="checkbox" name="tools" value="'+name+'"'+(['zig','rust'].includes(name)?' checked':'')+'> '+E(name)+'</label>').join('')+'</fieldset><p class="muted">Graphics, shader and platform prerequisites are verified by their native owner builders.</p><button type="submit" class="button primary"'+(!ready.length?' disabled':'')+'>Set up and activate</button> '+button('Check active environment','tools_check','',!value.active)+'<p class="form-message" role="alert"></p></form>'+U.table(['Tool','SDK requirement','Installed','State'],value.components.map(item=>[E(item.name),E(item.required),E(item.installed||'—'),E(item.state)]))+'</section>';
+    }else if(selected==='environments'){
+      html='<section class="record-section"><div class="panel-heading"><h2>Installed SDK environments</h2></div>'+(value.toolsets.length?U.records(value.toolsets.map(item=>U.record('<h2 class="record-name">'+E(item.id)+'</h2><span class="record-subline">'+E(item.id===value.active?'Active':item.status)+'</span>',button('Activate','tools_activate',item.id,item.id===value.active||item.status!=='ready'))),'Installed SDK environments'):U.empty('No SDK environments','Set up a verified SDK in Build Environment.'))+'</section>';
+    }else if(selected==='development'){
+      html='<section class="panel panel-body"><h2>Technical development snapshot</h2><p>An explicit snapshot pins managed SDK, Contract and Libraries sources. Changed sources make the snapshot stale. Technical builds cannot be published as qualified releases.</p><form id="sdk-development"><label>SDK<select name="sdk_id" required>'+ready.map(item=>'<option value="'+E(item.id)+'">'+E(item.version)+'</option>').join('')+'</select></label><label>Profile<select name="profile" required>'+[...new Set(ready.flatMap(item=>Object.keys(item.profiles)))].map(id=>'<option>'+E(id)+'</option>').join('')+'</select></label>'+['sdk','contract','libraries'].map(role=>'<label>'+E(role)+' repository ID<input name="'+role+'_repository" required placeholder="r4os-'+role+'"></label>').join('')+'<button class="button" type="submit"'+(!ready.length?' disabled':'')+'>Create technical snapshot</button><p class="form-message" role="alert"></p></form></section>';
+    }else if(selected==='maintenance'){
+      html='<section class="panel panel-body"><h2>Obsolete installations</h2><p>After SDK verification, remove obsolete local build environments. Historical receipts and application data are retained.</p>'+button('Remove obsolete installations','sdk_cleanup','',!value.active)+'</section>';
+    }else{
+      html='<section class="record-section" aria-label="Tool jobs"><p><a class="artifact-link" href="#repositories/logs/tools">Open all tool logs</a></p>'+(jobPage.jobs.length?jobRows(jobPage.jobs):U.empty('No tool jobs yet','SDK and tool jobs appear here after an action starts.'))+'</section>';
+    }
+    if(value.errors?.length)html='<p class="workspace-notice">'+E(value.errors.join(' · '))+'</p>'+html;
     U.page(ctx,'Tools','',html);
-    if(value.jobs.some(active))U.poll=setTimeout(()=>{if(ctx.generation===U.generation&&!document.querySelector('#detail-dialog[open]'))refreshPage(ctx);},2500);
+    U.status(pages.find(([id])=>id===selected)[1]+' loaded.');
+    if((jobPage?.jobs||value.jobs).some(active))pollTools(ctx);
   }
 
   function releaseRepository(repo,member){
@@ -247,6 +269,8 @@
     else if(event.target.name.startsWith('target:'))row.querySelector('[name="selected"]').checked=!!row.querySelector('.release-targets input:checked');
   });
   document.addEventListener('input',event=>{
+    const form=event.target.form;
+    if(['sdk-import','sdk-setup','sdk-development'].includes(form?.id))form.dataset.toolsDirty='true';
     if(event.target.id==='repository-search'){filter=event.target.value;applyFilter();}
     if(event.target.id==='release-repo-search')document.querySelectorAll('[data-release-search]').forEach(row=>row.hidden=!row.dataset.releaseSearch.includes(event.target.value.toLowerCase()));
     if(event.target.form?.id==='release-edit'){
