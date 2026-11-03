@@ -30,7 +30,8 @@ window.R4 = (() => {
     ui.show(ctx,toolbar+'<div class="page-scroll" role="region" aria-label="'+esc(title||'Page')+' content" tabindex="0"><section class="feature-page">'+html+'</section></div>');
   };
   ui.side = (ctx,items) => {
-    document.querySelector('.submenu-column').innerHTML='<p class="column-caption">'+esc(ctx.view==='apps'?'Apps':ctx.view==='updates'?'Update Center':ctx.view==='benchmarks'?'Benchmarks':ctx.view==='repositories'?'Repositories':'Settings')+'</p><nav class="secondary-navigation">'+items.map(([id,label])=>'<a class="sub-item" href="#'+ctx.view+'/'+id+'"'+(ctx.sub===id?' aria-current="page"':'')+'>'+esc(label)+'</a>').join('')+'</nav>';
+    const label={apps:'Apps',updates:'Update Center',benchmarks:'Benchmarks',repositories:'Repositories',settings:'Settings'}[ctx.view];
+    document.querySelector('.submenu-column:not(.third-column)').innerHTML='<nav class="secondary-navigation" aria-label="'+esc(label)+' views">'+items.map(([id,label])=>'<a class="sub-item" href="#'+ctx.view+'/'+id+'"'+(ctx.sub===id?' aria-current="page"':'')+'>'+esc(label)+'</a>').join('')+'</nav>';
   };
   ui.context = (ctx,items=[]) => {
     document.querySelector('.third-column').innerHTML=items.length?'<p class="column-caption">Selection</p><nav class="secondary-navigation">'+items.map(([id,label])=>'<a class="sub-item" href="#'+ctx.view+'/'+ctx.sub+'/'+encodeURIComponent(id)+'"'+((ctx.leaf||'all')===id?' aria-current="page"':'')+'>'+esc(label)+'</a>').join('')+'</nav>':'';

@@ -35,7 +35,6 @@
   function files(job){return (job.result.files||[]).map(file=>'<p><a class="artifact-link" href="/api/repositories/jobs/'+E(job.id)+'/files/'+E(file.id)+'">'+E(file.name)+'</a> · '+U.bytes(file.bytes)+'<br><small class="muted">SHA-256 '+E(file.sha256)+'</small></p>').join('');}
   U.views.repositories=async ctx=>{
     U.side(ctx,[['overview','Overview'],['connections','Connections'],['tools','Tools'],['releases','Releases'],['test-configurations','Test configurations'],['logs','Logs']]);
-    document.querySelector('.submenu-column .column-caption').textContent='Repositories';
     if(ctx.sub==='connections')return U.connectionsView(ctx);
     if(ctx.sub==='tools')return tools(ctx);
     if(ctx.sub==='releases')return releaseView(ctx);
