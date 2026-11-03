@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 import re
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from ..common.http import HTTPError
 from . import sdk_packages, sdk_projects, toolsets
@@ -45,6 +45,13 @@ def dispatch(handler):
     parts = [unquote(value) for value in path.removeprefix('/api/sdk/').split('/') if value]
     read = handler.command in ('GET','HEAD')
     try:
+        if parts == ['releases'] and read:
+            from .sdk_catalog import overview
+            query = parse_qs(urlsplit(handler.path).query)
+            custom = query.get('release_url', [None])[0]
+            if custom:
+                sdk_packages.release_base(custom)
+            return handler.json(200, overview(store, refresh=query.get('refresh') == ['1'], custom_url=custom))
         if read and parts and parts[0] in ('catalog','assets','packages'):
             return client_download(handler,store.root/'BuildTools',path)
         if parts == ['imports']:
