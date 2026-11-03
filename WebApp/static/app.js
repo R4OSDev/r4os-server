@@ -21,7 +21,10 @@ window.R4 = (() => {
   ui.table = (headers,rows) => '<div class="table-scroll"><table><thead><tr>'+headers.map(v=>'<th>'+esc(v)+'</th>').join('')+'</tr></thead><tbody>'+rows.map(row=>'<tr>'+row.map(v=>'<td>'+v+'</td>').join('')+'</tr>').join('')+'</tbody></table></div>';
   ui.card = (label,value,note='') => '<div class="metric-card"><span>'+esc(label)+'</span><strong>'+esc(value)+'</strong><small>'+esc(note)+'</small></div>';
   ui.show = (ctx,html) => {if(ctx.generation===ui.generation) content.innerHTML=html;};
-  ui.page = (ctx,title,description,html,actions='',refresh=true) => ui.show(ctx,'<section class="feature-page"><header class="page-heading"><div>'+(ctx.view==='repositories'?'':'<p class="eyebrow">R4OS SERVER / '+esc(ctx.view==='apps'?'APPS':ctx.view==='updates'?'UPDATE CENTER':ctx.view==='benchmarks'?'BENCHMARKS':'SETTINGS')+'</p>')+'<h1>'+esc(title)+'</h1>'+(description?'<p class="page-description">'+esc(description)+'</p>':'')+'</div><div class="page-actions">'+actions+(refresh?'<button type="button" class="button subtle" data-action="refresh">Refresh</button>':'')+'</div></header>'+html+'</section>');
+  ui.page = (ctx,title,description,html,actions='',refresh=true) => {
+    const buttons=actions+(refresh?'<button type="button" class="button subtle" data-action="refresh">Refresh</button>':'');
+    ui.show(ctx,'<section class="feature-page" aria-label="'+esc(title)+'">'+(buttons?'<header class="page-heading"><div class="page-actions">'+buttons+'</div></header>':'')+html+'</section>');
+  };
   ui.side = (ctx,items) => {
     document.querySelector('.submenu-column').innerHTML='<p class="column-caption">'+esc(ctx.view==='apps'?'Apps':ctx.view==='updates'?'Update Center':ctx.view==='benchmarks'?'Benchmarks':ctx.view==='repositories'?'Repositories':'Settings')+'</p><nav class="secondary-navigation">'+items.map(([id,label])=>'<a class="sub-item" href="#'+ctx.view+'/'+id+'"'+(ctx.sub===id?' aria-current="page"':'')+'>'+esc(label)+'</a>').join('')+'</nav>';
   };
