@@ -16,6 +16,22 @@ from .store import Store, now
 def execute(context):
     job = context.job
     kind, subject, payload = job["kind"], job["subject"], job["payload"]
+    if kind.startswith('sdk_'):
+        from . import sdk_packages
+        if kind == 'sdk_release_link':
+            from .sdk_releases import attach
+            return attach(context,payload)
+        if kind == 'sdk_import': return sdk_packages.import_release(context,payload)
+        if kind == 'sdk_verify': return {'sdk_id':payload['sdk_id'],'verification':sdk_packages.verify(context,payload['sdk_id'])}
+        if kind == 'sdk_profile':
+            if payload['action']=='resolve': return sdk_packages.resolve(context,payload['sdk_id'],payload['profile'])
+            return sdk_packages.cli(context,payload['sdk_id'],'Profile.ps1',['-Action','Describe','-Profile',payload['profile']])
+        if kind == 'sdk_cleanup':
+            from .sdk_cleanup import cleanup
+            return cleanup(context)
+        if kind == 'sdk_develop':
+            from .sdk_projects import create_development
+            return create_development(context,payload)
     if kind == "connection_delete":
         return connections.remove(context)
     if kind == "app_publish":
@@ -56,7 +72,7 @@ def execute(context):
         return catalog.batch(context, "download" if kind == "download_all" else "update", payload.get("connection_id"), targets=payload.get("targets"))
     if kind == "check":
         if subject:
-            return catalog.inspect(context, subject)
+            return catalog.inspect(context, subject, remote=not payload.get("profile_refresh",False))
         checked = []
         for repo in context.store.repositories(payload.get("connection_id")):
             if not repo["available"]:

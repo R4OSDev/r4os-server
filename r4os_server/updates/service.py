@@ -29,6 +29,10 @@ class Handler(UpdateGatewayHandler):
                 return self.json(status,result)
             if self.command not in ("GET","HEAD"):
                 raise HTTPError(405,"method_not_allowed")
+            if path.startswith('/sdk/'):
+                self.server.policy.client(self)
+                from ..workspace.sdk_api import client_download
+                return client_download(self,self.server.sdk_storage,path,public=True)
             return self._handle(self.command=="HEAD")
         except HTTPError as error:
             self.json(error.status,error.body)
@@ -95,6 +99,8 @@ def create_server(config):
                   config.block_seconds,config.updates_port)
     server.RequestHandlerClass=Handler
     server.policy=AccessPolicy(config,access,"updates")
+    server.sdk_storage=Path(config.workspace_dir or config.data_dir/'workspace')/'BuildTools'
+    server.sdk_base_url=config.updates_url.rstrip('/')+'/sdk'
     server.version=(Path(__file__).resolve().parents[2]/"VERSION").read_text().strip()
     configure_server(server,config)
     try:
@@ -110,6 +116,8 @@ def create_public_server(config, private):
                   config.attempt_limit,config.block_seconds,config.updates_port)
     server.RequestHandlerClass=Handler
     server.policy=private.policy
+    server.sdk_storage=private.sdk_storage
+    server.sdk_base_url=(config.public_updates_url or config.updates_url).rstrip('/')+'/sdk'
     server.version=private.version
     server.uploads=private.uploads
     server.owns_uploads=False

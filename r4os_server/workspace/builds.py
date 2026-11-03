@@ -1,52 +1,75 @@
-"""Owner builds in disposable source snapshots, with immutable output receipts."""
-import hashlib
+"""Pinned project builds through the selected SDK's owner builders."""
 from datetime import datetime
+import hashlib
 import json
-import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import tarfile
 
-from . import catalog
+from . import catalog, sdk_packages, sdk_projects, toolsets
 from .profiles import fields
 from .process import clean_env
 from .store import identifier, now, under
 from .toolsets import active, clone_snapshot, digest, write_json
 
-ROLES = {"r4os-app-": "Apps", "r4os-games-": "Apps", "r4os-service-": "Services", "r4os-diagnostic-": "Diagnostics",
-         "r4os-driver-": "Drivers", "r4os-protocol-": "Protocols", "r4os-subsystem-": "Subsystems"}
-CENTRAL = {"r4os-kernel": "Kernel", "r4os-sdk": "SDK", "r4os-contract": "Contract",
-           "r4os-libraries": "Libraries", "r4os-distribution": "Distribution", "r4os-recovery": "Recovery"}
+ROLES = {"r4os-app-":"Apps","r4os-games-":"Apps","r4os-service-":"Services","r4os-diagnostic-":"Diagnostics",
+         "r4os-driver-":"Drivers","r4os-protocol-":"Protocols","r4os-subsystem-":"Subsystems"}
+CENTRAL = {"r4os-kernel":"Kernel","r4os-sdk":"SDK","r4os-contract":"Contract","r4os-libraries":"Libraries",
+           "r4os-distribution":"Distribution","r4os-recovery":"Recovery"}
 
 
-def inputs(store, value):
-    repo = store.require_repository(value.get("name", ""))
-    local = repo["local"]
-    target = value.get("target")
-    modules = [module for module in local.get("modules", []) if module["id"] == target]
-    if not modules:
-        raise ValueError("The build target was not found in the repository.")
-    if modules[0].get("supported") is False:
-        raise ValueError(modules[0].get("reason", "A suitable build adapter for this target is missing."))
-    if not local.get("commit") or local.get("dirty"):
-        raise ValueError("A downloaded, clean source revision is required.")
-    root, tools = active(store)
-    sources = {}
-    module = dict(modules[0], source_ids={})
-    for name in module.get("source_repositories", []):
-        source = store.source_repository(name, repo["connection_id"])
-        if not source["local"].get("commit") or source["local"].get("dirty"):
-            raise ValueError(name + ": required as a clean local source import. Download it or check its status first.")
-        sources[source["name"]] = source["local"]["commit"]
-        module["source_ids"][name] = source["name"]
-    return repo, {"target": target, "module": module, "commit": local["commit"], "toolset": tools["id"], "source_dependencies": sources}
+def selection(store, name):
+    options=sdk_projects.get(store,name)
+    path,tools=active(store)
+    if options['sdk_id'] and tools['sdk_id']!=options['sdk_id']:
+        matches=[]
+        for candidate in (store.root/'BuildTools/Toolsets').glob('*/toolset.json'):
+            try:
+                candidate_path,candidate_tools=toolsets.load(store,candidate.parent.name)
+                if candidate_tools['sdk_id']==options['sdk_id']:matches.append((candidate_path,candidate_tools))
+            except ValueError:continue
+        if len(matches)!=1:raise ValueError('Set up the SDK selected for this repository.')
+        path,tools=matches[0]
+    return path,tools,sdk_packages.get(store,tools['sdk_id']),options
 
 
-def enqueue(store, value):
-    repo, payload = inputs(store, value)
-    return store.enqueue("build", repo["name"], payload)
+def inputs(store,value):
+    repo=store.require_repository(value.get('name',''));local=repo['local']
+    module=next((dict(item) for item in local.get('modules',[]) if item['id']==value.get('target')),None)
+    if module is None:raise ValueError('The build target was not found in the repository.')
+    if module.get('supported') is False:raise ValueError(module.get('reason','The SDK has not validated this target.'))
+    if not local.get('commit') or local.get('dirty'):raise ValueError('A downloaded, clean source revision is required.')
+    _,tools,package,options=selection(store,repo['name'])
+    declared=module.get('sdk_profile')
+    if not declared or declared.get('sdk_id')!=package['id']:
+        role='native' if module['id'].startswith('native-') else 'module' if module.get('manifest') else 'kernel' if module['id']=='kernel' else 'recovery' if module['id']=='recovery' else 'host'
+        choices=[name for name,profile in package['manifest']['profiles'].items() if profile['role']==role and profile['language']==module['language']]
+        if len(choices)!=1:raise ValueError('Refresh the repository to obtain its SDK-owned profile selection.')
+        declared=sdk_packages.provenance(package,choices[0])
+    if declared.get('profile') not in package['manifest']['profiles']:raise ValueError('Unknown SDK profile.')
+    module['sdk_profile']=declared;module['source_ids']={};sources={}
+    bound={'r4os-sdk':package['manifest']['sdk_source'],**{'r4os-'+key:package['manifest']['sources'][key] for key in ('contract','libraries')}}
+    if repo['display_name'] in bound and local['commit']!=bound[repo['display_name']]['commit']:
+        raise ValueError('Update this source repository to the exact commit selected by the SDK before building it.')
+    system={'r4os-sdk','r4os-contract','r4os-libraries'}
+    for name in module.get('source_repositories',[]):
+        if name in system:continue
+        source=store.source_repository(name,repo['connection_id'])
+        if not source['local'].get('commit') or source['local'].get('dirty'):raise ValueError(name+': a clean local source dependency is required.')
+        sources[source['name']]=source['local']['commit'];module['source_ids'][name]=source['name']
+    for extra in options['libraries']:
+        source=store.require_repository(extra['repository'])
+        if not source['local'].get('commit') or ('commit' in extra and source['local']['commit']!=extra['commit']) or source['local'].get('dirty'):raise ValueError(extra['id']+': additional library pin differs from the local source.')
+        sources[source['name']]=source['local']['commit']
+    payload={'target':module['id'],'module':module,'commit':local['commit'],'toolset':tools['id'],'sdk_id':package['id'],
+             'sdk_profile':declared,'source_dependencies':sources,'additional_libraries':options['libraries'],'development_id':options['development_id']}
+    return repo,payload
+
+
+def enqueue(store,value):
+    repo,payload=inputs(store,value);return store.enqueue('build',repo['name'],payload)
 
 
 def owner_relative(name, module=None, identity=None):
@@ -79,183 +102,122 @@ def snapshot(context, name, commit, destination):
         archive.unlink(missing_ok=True)
 
 
-def workspace(context, tools, key):
-    root = context.store.root / "BuildTools/Workspaces" / identifier(key)
-    if root.exists():
-        raise ValueError("A build working directory with this ID already exists.")
-    repos = root / "Repositories"
-    repos.mkdir(parents=True)
-    (root / "DevKit").symlink_to(tools / "DevKit", target_is_directory=True)
-    (root / "Tools").symlink_to(tools / "Repositories/Project/Tools", target_is_directory=True)
-    for name in ("SDK", "Contract", "Libraries", "Distribution"):
-        (repos / name).symlink_to(tools / "Repositories" / name, target_is_directory=True)
+def workspace(context,tools,key):
+    root=context.store.root/'BuildTools/Workspaces'/identifier(key)
+    if root.exists():raise ValueError('A build working directory with this ID already exists.')
+    (root/'Repositories').mkdir(parents=True)
+    manifest=sdk_packages.strict_json((tools/'toolset.json').read_bytes())
+    paths=toolsets.package_paths(context.store,manifest)
+    shutil.copytree(paths['SDK'],root/'Repositories/SDK')
+    for name in ('Contract','Libraries'):
+        shutil.copytree(paths[name],root/'Repositories'/name)
+    (root/'Repositories/Recovery').symlink_to(paths['Recovery'],target_is_directory=True)
+    (root/'Repositories/Tools').symlink_to(paths['HostTools'],target_is_directory=True)
+    (root/'Install').symlink_to(tools/'Install',target_is_directory=True)
+    # Current owner Settings use this name only for the SDK-selected install location.
+    (root/'DevKit').symlink_to(tools/'Install',target_is_directory=True)
     return root
 
 
-def configure_owner(root, owner, tools, output):
-    values = {"WORKSPACE_ROOT": str(root), "REPOSITORIES_ROOT": str(root / "Repositories"),
-              "SDK_ROOT": str(root / "Repositories/SDK"), "CONTRACT_ROOT": str(root / "Repositories/Contract"),
-              "LIBRARIES_ROOT": str(root / "Repositories/Libraries"), "KERNEL_ROOT": str(root / "Repositories/Kernel"),
-              "DISTRIBUTION_ROOT": str(root / "Repositories/Distribution"), "DEVKIT_ROOT": str(tools / "DevKit"),
-              "ARTIFACTS_ROOT": str(output), "ZIG_ROOT": str(tools / "DevKit/Toolchains/Zig"),
-              "RUST_TOOLS_ROOT": str(tools / "HostTools"), "RUST_TOOLS_TECHNICAL": "false",
-              "APPS_ROOT": "Apps", "SERVICES_ROOT": "Services", "DIAGNOSTICS_ROOT": "Diagnostics",
-              "DRIVERS_ROOT": "Drivers", "PROTOCOLS_ROOT": "Protocols", "SUBSYSTEMS_ROOT": "Subsystems",
-              "LIMINE_ROOT": "Boot/Limine", "QEMU_ROOT": "Emulation/QEMU", "DEVKIT_HOSTTOOLS_ROOT": "HostTools/bin",
-              "DISTRIBUTION_OUTPUT_ROOT": "Distribution", "INPUT_ROOT": "Distribution/Inputs", "PRIVATE_INJECTION_ROOT": "Distribution/PrivateInjection"}
-    if owner == root / "Repositories/Distribution":
-        values.update(WORKSPACE_ROOT="../..", REPOSITORIES_ROOT="..", SDK_ROOT="SDK", CONTRACT_ROOT="Contract",
-                      LIBRARIES_ROOT="Libraries", KERNEL_ROOT="Kernel", DEVKIT_ROOT="DevKit",
-                      ARTIFACTS_ROOT=os.path.relpath(output, root), ZIG_ROOT="Toolchains/Zig")
-    (owner / "Settings.R4S").write_text("# Local build path mapping\n" + "\n".join(key + "=" + str(value) for key, value in values.items()) + "\n")
+def configure_owner(root,owner,tools,output):
+    if owner in (root/'Repositories/SDK',root/'Repositories/Contract',root/'Repositories/Libraries',root/'Repositories/Recovery'):
+        return  # SDK-bound source originals include their location-only Settings.
+    values={'WORKSPACE_ROOT':str(root),'REPOSITORIES_ROOT':str(root/'Repositories'),
+            'SDK_ROOT':str(root/'Repositories/SDK'),'CONTRACT_ROOT':str(root/'Repositories/Contract'),
+            'LIBRARIES_ROOT':str(root/'Repositories/Libraries'),'KERNEL_ROOT':str(root/'Repositories/Kernel'),
+            'DISTRIBUTION_ROOT':str(root/'Repositories/Distribution'),'INSTALL_ROOT':str(tools/'Install'),
+            'DEVKIT_ROOT':str(tools/'Install'),'ARTIFACTS_ROOT':str(output),'ZIG_ROOT':str(tools/'Install/Toolchains/Zig'),
+            'RUST_TOOLS_ROOT':str((root/'Repositories/SDK').resolve().parent/'Tools'),
+            'APPS_ROOT':'Apps','SERVICES_ROOT':'Services','DIAGNOSTICS_ROOT':'Diagnostics','DRIVERS_ROOT':'Drivers',
+            'PROTOCOLS_ROOT':'Protocols','SUBSYSTEMS_ROOT':'Subsystems','LIMINE_ROOT':str(tools/'Install/Boot/Limine'),
+            'QEMU_ROOT':str(tools/'Install/Emulation/QEMU'),'DISTRIBUTION_OUTPUT_ROOT':'Distribution',
+            'INPUT_ROOT':'Distribution/Inputs','PRIVATE_INJECTION_ROOT':'Distribution/PrivateInjection'}
+    (owner/'Settings.R4S').write_text('# Generated SDK build paths; versions are selected by SDK profiles.\n'+'\n'.join(key+'='+value for key,value in values.items() if value)+'\n')
 
 
-def prepare_source_dependencies(context, root, owner, module, tools, sources):
-    """Keep the conventional owner paths used by cross-repository wire imports."""
-    texts = ["\n".join(module.get("zig_modules", []))]
-    folder = owner / Path(module.get("manifest", ".")).parent
-    if not (folder / "build.zig").is_file() and (owner / "build.zig").is_file():
-        folder = owner
-    if (folder / "build.zig").is_file():
-        texts.append((folder / "build.zig").read_text())
-    aliases = re.findall(r'(?:\.\./)+(Apps|Services|Diagnostics|Drivers|Protocols|Subsystems)/([A-Za-z0-9_-]+)/', "\n".join(texts))
-    for name in module.get("source_repositories", []):
-        destination = root / "Repositories" / owner_relative(name)
+def prepare_source_dependencies(context,root,owner,module,tools,sources):
+    for name,source_id in module.get('source_ids',{}).items():
+        destination=root/'Repositories'/owner_relative(name)
         if not destination.exists():
-            source_id = module.get("source_ids", {}).get(name, name)
-            commit = sources.get(source_id)
-            if not commit:
-                raise ValueError("Pinned source import missing: " + name)
-            snapshot(context, source_id, commit, destination)
-            configure_owner(root, destination, tools, root / "Output")
-        for role, label in aliases:
-            if owner_relative(name) == Path(role) / label.lower():
-                alias = root / "Repositories" / role / label
-                if alias != destination and not alias.exists():
-                    alias.symlink_to(destination.name, target_is_directory=True)
+            clone_snapshot(context,catalog.repository_path(context.store,context.store.require_repository(source_id)),destination,sources[source_id])
+    extras=[]
+    for extra in context.job['payload'].get('additional_libraries',[]):
+        destination=root/'Additional'/extra['id'];destination.parent.mkdir(exist_ok=True)
+        source=catalog.repository_path(context.store,context.store.require_repository(extra['repository']))
+        if 'commit' in extra:
+            clone_snapshot(context,source,destination,extra['commit'])
+            item={'id':extra['id'],'root':str(destination),'commit':extra['commit']}
+            if extra.get('path'):item['path']=extra['path']
+        else:
+            snapshot(context,extra['repository'],sources[extra['repository']],destination)
+            scope=destination/extra.get('path','')
+            item={'id':extra['id'],'root':str(scope),'tree':extra['tree']}
+        extras.append(item)
+    if extras:write_json(root/'additional-libraries.json',extras)
 
 
-def private_libraries(context, root, tools):
-    libraries = root / "Repositories/Libraries"
-    if libraries.is_symlink():
-        source = libraries.resolve()
-        libraries.unlink()
-        commit, _ = context.git(source, "rev-parse", "HEAD")
-        clone_snapshot(context, source, libraries, commit.strip())
-    marker = root / "Generated/library-script-sources.json"
-    if not marker.exists():
-        source, reference = libraries, "HEAD"
-        if not (libraries / ".git").is_dir():
-            source = catalog.repository_path(context.store, context.store.source_repository("r4os-libraries"))
-            reference = context.job["payload"]["commit"]
-        names, _ = context.git(source, "ls-tree", "-r", "--name-only", "-z", reference)
-        names = [name for name in names.split("\0") if Path(name).suffix in (".ps1", ".bat", ".cmd") and (libraries / name).is_file()]
-        before = {name: digest(libraries / name) for name in names}
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        for name in names:
-            context.check()
-            raw = subprocess.run(["git", "-C", source, "cat-file", "blob", reference + ":" + name], env=clean_env(), check=True, capture_output=True, timeout=30)
-            under(libraries, name).write_bytes(raw.stdout)
-        changed = {name: {"checkout": value, "git_blob": digest(libraries / name)} for name, value in before.items() if digest(libraries / name) != value}
-        write_json(marker, {"reason": "Canonical Git blob bytes for source/recipe hash checks; checkout EOL conversion is not a source change.", "files": changed})
-        if changed:
-            context.log("Library recipes prepared from canonical Git blobs: " + str(len(changed)))
-    return libraries
+def private_libraries(context,root,tools):
+    return root/'Repositories/Libraries'
 
 
-def prepare_library_bindings(context, root, tools):
-    """Regenerate compiler-owned ABI projections in a private Libraries copy."""
-    marker = root / "Generated/library-bindings.json"
-    if marker.is_file():
-        return
-    libraries = private_libraries(context, root, tools)
-    sdk, contract = root / "Repositories/SDK", root / "Repositories/Contract"
-    prefix = root / "Generated/LibraryTools"
-    zig = tools / "DevKit/Toolchains/Zig/zig"
-    paths = [libraries / "Shared/C/include/r4libraries/helpers.h", libraries / "Shared/Language/fingerprint.zig",
-             libraries / "Shared/Rust/src/raw.rs"]
-    before = {str(path.relative_to(libraries)): digest(path) for path in paths}
-    context.phase("Preparing compiler-validated C/Rust library bindings")
-    for selector, program, arguments in (("library-helpers-generator-only", "library-helpers-gen", paths[:2]),
-                                          ("library-helpers-rust-generator-only", "library-helpers-rust-gen", paths[2:])):
-        context.run([zig, "build", "-j2", "--fork=" + str(contract), "-Dlibrary-helpers-root=" + str(libraries),
-                     "-D" + selector + "=true", "--prefix", prefix,
-                     "--cache-dir", context.store.root / "BuildTools/Cache/Zig/Library-Generators",
-                     "--global-cache-dir", context.store.root / "BuildTools/Cache/Zig/Global"], cwd=sdk, timeout=2400)
-        context.run([prefix / "bin" / program, "write", *arguments], timeout=300)
-    write_json(marker, {"before": before, "generated": {str(path.relative_to(libraries)): digest(path) for path in paths}})
+def prepare_library_bindings(context,root,tools):
+    # SDK native-input helpers own their compiler projections and receipts.
+    return root/'Repositories/Libraries'
 
 
-def module_build(context, root, owner, module, tools, output):
-    output.mkdir(parents=True, exist_ok=True)
-    zig = tools / "DevKit/Toolchains/Zig/zig"
-    sdk, contract, libraries = [root / "Repositories" / name for name in ("SDK", "Contract", "Libraries")]
-    cache = context.store.root / "BuildTools/Cache/Zig"
-    module_root = owner / Path(module["manifest"]).parent
-    catalog_exe = context.store.root / "BuildTools/Metadata" / tools.name / "HostTools/bin/module-catalog"
-    action = "metadata"
-    if not catalog_exe.is_file():
-        catalog_exe, action = tools / "HostTools/bin/x86_64-unknown-linux-gnu/module-catalog", "plan"
-        if not catalog_exe.is_file():
-            catalog_exe = tools / "HostTools/bin/module-catalog"
-    facts, _ = context.run([catalog_exe, action, "--manifest", owner / module["manifest"]], quiet=True)
-    plan = json.loads(facts)
-    if module["language"] == "Rust" or not any((folder / "build.zig").is_file() for folder in (module_root, owner)):
-        cargo = module_root / "Cargo.toml"
-        needs_helpers = cargo.is_file() and "r4os-library-helpers" in cargo.read_text()
-        if needs_helpers:
-            prepare_library_bindings(context, root, tools)
-        context.run(["pwsh", "-NoLogo", "-NoProfile", "-File", sdk / "Tools/Build-Project.ps1",
-                     "-ProjectRoot", module_root, "-SdkRoot", sdk, "-ContractRoot", contract, "-ToolsRoot", tools / "HostTools",
-                     "-InstallRoot", tools / "DevKit", "-CacheRoot", context.store.root / ("BuildTools/Cache/Rust-Build" if module["language"] == "Rust" else "BuildTools/Cache/Manifest-Build"),
-                     "-OutputRoot", output, *(["-LibraryHelpersRoot", libraries] if needs_helpers else []), "-ZigRoot", zig.parent], timeout=3600)
-    else:
-        if not (module_root / "build.zig").is_file() and (owner / "build.zig").is_file():
-            module_root = owner
-        forks = ["--fork=" + str(sdk), "--fork=" + str(contract)]
-        zone = module_root / "build.zig.zon"
-        if zone.is_file() and re.search(r"\.r4os_libraries\s*=", zone.read_text()):
-            libraries = private_libraries(context, root, tools)
-            forks.append("--fork=" + str(libraries))
-        if zone.is_file():
-            declared = set(re.findall(r'https://github.com/R4OSDev/([A-Za-z0-9_.-]+)/archive/', zone.read_text()))
-            for name in module.get("source_repositories", []):
-                if name in declared:
-                    forks.append("--fork=" + str(root / "Repositories" / owner_relative(name)))
-        context.run([zig, "build", "-j2", "--prefix", output, "--cache-dir", cache / (tools.name + "-" + module["id"]),
-                     "--global-cache-dir", cache / "Global", *forks], cwd=module_root, timeout=3600)
-    expected = module["id"] + "." + module["kind"]
-    matches = [path for path in output.rglob(expected) if ".cache" not in path.parts and path.is_file()]
-    if len(matches) != 1 or not matches[0].stat().st_size:
-        raise ValueError("Expected module is missing or ambiguous: " + expected)
-    return matches, plan
+def module_build(context,root,owner,module,tools,output):
+    manifest=sdk_packages.strict_json((tools/'toolset.json').read_bytes())
+    paths=toolsets.package_paths(context.store,manifest)
+    sdk,contract,libraries=root/'Repositories/SDK',root/'Repositories/Contract',root/'Repositories/Libraries'
+    development=context.job['payload'].get('development_id');development_file=None
+    if development:
+        roots,development_file=sdk_projects.development(context.store,development,manifest['sdk_id'])
+        sdk,contract,libraries=roots['sdk'],roots['contract'],roots['libraries']
+    selected=context.job['payload']['sdk_profile'];key=manifest['sdk_id']
+    extras=root/'additional-libraries.json'
+    # Resolve before compilation. The SDK checks system providers and all own pins.
+    if development_file:
+        result=root/'development-resolution.json'
+        context.run(['pwsh','-NoLogo','-NoProfile','-File',sdk/'Tools/Profile.ps1','-Action','Resolve','-Profile',selected['profile'],
+                     '-ContractRoot',contract,'-LibrariesRoot',libraries,'-DevelopmentProfile',development_file,'-Output',result],timeout=600)
+    else:sdk_packages.resolve(context,key,selected['profile'],additional=extras if extras.exists() else None)
+    module_root=owner/Path(module['manifest']).parent
+    bound=any(owner.resolve().is_relative_to((root/'Repositories'/name).resolve()) for name in ('SDK','Contract','Libraries','Recovery'))
+    if (module_root/'build.zig.zon').is_file() and not bound:
+        context.run(['pwsh','-NoLogo','-NoProfile','-File',sdk/'Tools/Sync-ComponentPins.ps1','-SdkRoot',sdk,'-ProjectRoot',module_root,'-Write'],timeout=120)
+    # Use the SDK's explicit Rust owner entry point. In SDK 0.64.145 the generic
+    # wrapper forwards a stale native exit code after a successful Rust receipt.
+    script='Build-RustModule.ps1' if module['language']=='Rust' else 'Build-Project.ps1'
+    args=['pwsh','-NoLogo','-NoProfile','-File',sdk/'Tools'/script,'-ProjectRoot',module_root,
+          '-SdkRoot',sdk,'-ContractRoot',contract,'-LibrariesRoot',libraries,'-ToolsRoot',paths['HostTools'],
+          '-InstallRoot',tools/'Install','-ZigRoot',tools/'Install/Toolchains/Zig',
+          '-CacheRoot',context.store.root/'BuildTools/Cache/SDK'/manifest['sdk_id'],'-OutputRoot',output]
+    if extras.exists():args+=['-AdditionalLibrariesFile',extras]
+    if development_file:args+=['-DevelopmentProfile',development_file,'-Technical']
+    dependency_roots=[]
+    for name,source_id in module.get('source_ids',{}).items():
+        dependency_roots.append(str(root/'Repositories'/owner_relative(name)))
+    if extras.exists():
+        for extra in sdk_packages.strict_json(extras.read_bytes()):
+            dependency_roots.append(str(Path(extra['root'])/extra.get('path','')))
+    if dependency_roots and module['language']=='Rust':args+=['-DependencyRootsJson',json.dumps(sorted(set(dependency_roots)))]
+    context.run(args,timeout=3600)
+    receipt=sdk_packages.strict_json((output/'build.json').read_bytes());proof=receipt.get('sdk_profile',{})
+    if (receipt.get('status')!='success' or proof.get('id')!=selected['profile'] or proof.get('hashes')!=selected['profile_sources']
+            or bool(proof.get('technical'))!=bool(development_file)):
+        raise ValueError('The SDK build receipt does not match the pinned profile.')
+    artifact=output/(module['id']+'.'+module['kind'])
+    if not artifact.is_file() or artifact.stat().st_size==0:raise ValueError('The SDK did not produce the selected target artifact.')
+    proof=receipt.get('artifact',{})
+    if proof.get('file')!=artifact.name or proof.get('bytes')!=artifact.stat().st_size or proof.get('sha256')!=digest(artifact):
+        raise ValueError('The artifact differs from its SDK receipt.')
+    return [artifact],receipt
 
 
-def execute_target(context, root, owner, module, tools, output):
-    if "manifest" in module:
-        return module_build(context, root, owner, module, tools, output)
-    output.mkdir(parents=True, exist_ok=True)
-    zig, contract = tools / "DevKit/Toolchains/Zig/zig", root / "Repositories/Contract"
-    key = module["id"]
-    if key == "kernel":
-        context.run(["sh", owner / "Build.sh", "build"], cwd=owner, timeout=3600)
-        paths = [owner / "zig-out/bin/r4os.elf"]
-    elif key == "recovery":
-        context.run(["pwsh", "-NoLogo", "-NoProfile", "-File", owner / "Build.ps1", "-Mode", "Kernel", "-Zig", zig], cwd=owner, timeout=3600)
-        paths = [owner / "Artifacts/Kernel/bin/recovery.elf"]
-    else:
-        cache = context.store.root / "BuildTools/Cache/Zig"
-        flags = [] if key == "contract-tools" else ["--fork=" + str(contract)]
-        if key == "distribution-tools":
-            flags += ["--fork=" + str(root / "Repositories/SDK"), "--fork=" + str(root / "Repositories/Libraries")]
-        selectors = ["packager-only", "catalog-only", "r4l-contract-generator-only"] if key == "sdk-tools" else [None]
-        for selector in selectors:
-            context.run([zig, "build", "-j2", "--prefix", output, "--cache-dir", cache / (tools.name + "-" + key),
-                         "--global-cache-dir", cache / "Global", *flags, *(["-D" + selector + "=true"] if selector else [])], cwd=owner, timeout=3600)
-        paths = [path for path in (output / "bin").glob("*") if path.is_file()]
-    if not paths or any(not path.is_file() or not path.stat().st_size for path in paths):
-        raise ValueError("The owner build did not produce the expected outputs.")
-    return paths, {}
+def execute_target(context,root,owner,module,tools,output):
+    if module.get('manifest'):return module_build(context,root,owner,module,tools,output)
+    from .sdk_owners import execute
+    return execute(context,root,owner,module,tools,output)
 
 
 def register_outputs(store, root):
@@ -272,9 +234,12 @@ def build(context, name, payload):
     store = context.store
     tool_key = identifier(payload["toolset"])
     tools = under(store.root / "BuildTools/Toolsets", tool_key)
-    tool_manifest = json.loads((tools / "toolset.json").read_text())
+    tools, tool_manifest = toolsets.load(store, tool_key)
+    if payload.get("sdk_id") != tool_manifest["sdk_id"] or payload.get("sdk_profile", {}).get("profile_sources") != tool_manifest["sdk_profile_sources"]:
+        raise ValueError("This job uses a removed or different SDK contract. Start a new SDK build.")
     if tool_manifest.get("status") != "ready":
         raise ValueError("The selected toolset is not ready.")
+    sdk_packages.verify(context,payload["sdk_id"])
     local = catalog.inspect(context, name, remote=False)
     modules = [item for item in local.get("modules", []) if item["id"] == payload["target"]]
     if not modules and not payload.get('module'):
@@ -282,10 +247,8 @@ def build(context, name, payload):
     module = payload.get("module") or modules[0]
     root = workspace(context, tools, context.job["id"])
     owner = root / "Repositories" / owner_relative(store.repository(name)["display_name"], module, name)
-    if owner.is_symlink():
-        owner.unlink()
     context.phase("Preparing source snapshot for " + name)
-    snapshot(context, name, payload["commit"], owner)
+    if not owner.exists():snapshot(context,name,payload['commit'],owner)
     if payload.get('github_release') and module.get('manifest'):
         values = fields(owner / module['manifest'])
         if any(values.get(key) != [expected] for key, expected in (('NAME', module['id']), ('KIND', module['kind']), ('VERSION', module['version']))):
@@ -302,10 +265,11 @@ def build(context, name, payload):
     files_dir.mkdir()
     for path in paths:
         shutil.copy2(path, files_dir / path.name)
-    receipt = {"schema": 1, "status": "success", "repository": name, "commit": payload["commit"], "module": module,
+    receipt = {"schema": 2, "status": "success", "repository": name, "commit": payload["commit"], "module": module,
                "toolset": tool_key, "tools": tool_manifest["versions"], "sources": tool_manifest["sources"],
-               "plan": plan, "started": context.job.get("started"), "finished": now()}
+               "plan": plan, "sdk_profile": payload["sdk_profile"], "technical": bool(payload.get("development_id")), "started": context.job.get("started"), "finished": now()}
     receipt["source_dependencies"] = payload.get("source_dependencies", {})
+    receipt["additional_libraries"] = payload.get("additional_libraries", [])
     if receipt["started"]:
         receipt["duration_seconds"] = max(0, (datetime.fromisoformat(receipt["finished"]) - datetime.fromisoformat(receipt["started"])).total_seconds())
     native_receipts = [(output / "build.json", "sdk-build.json"), (owner / "zig-out/bin/r4os.build.json", "kernel-build.json")]
@@ -330,4 +294,4 @@ def build(context, name, payload):
     final.parent.mkdir(parents=True, exist_ok=True)
     destination.rename(final)
     return {"repository": name, "target": module["id"], "commit": payload["commit"], "toolset": tool_key,
-            "files": register_outputs(store, final), "output": str(final.relative_to(store.root))}
+            "sdk_profile": payload["sdk_profile"], "technical": bool(payload.get("development_id")), "files": register_outputs(store, final), "output": str(final.relative_to(store.root))}

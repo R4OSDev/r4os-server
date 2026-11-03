@@ -191,11 +191,21 @@ def preview(store, key):
     repos = {item["name"]: item for item in store.repositories()}
     main = {item["display_name"]: item for item in repos.values() if item["connection_id"] == "main" and item["listed"]}
     components, issues, dependencies = [], [], {}
+    project=main.get('r4os-project')
+    if not project or not project['local'].get('commit') or project['local'].get('dirty'):
+        issues.append('r4os-project: a clean local image owner revision is required.')
+    else:dependencies[project['name']]=project['local']['commit']
     docs = main.get("r4os-docs")
     if not docs or not docs["local"].get("commit") or docs["local"].get("dirty"):
         issues.append("r4os-docs: a clean local revision is required for the existing document inventory.")
     else:
         dependencies[docs["name"]] = docs["local"]["commit"]
+    distribution=main.get('r4os-distribution')
+    if distribution:
+        from . import catalog
+        script=catalog.repository_path(store,distribution)/'Tools/Distribution.ps1'
+        if script.is_file() and 'Get-R4SdkBuildContext' not in script.read_text(encoding='utf-8-sig'):
+            issues.append('Update Distribution to an SDK-profile-aware source revision before building an image.')
     for required in CORE:
         if required not in main or not release["members"].get(main[required]["name"], {}).get("selected"):
             issues.append(required + ": required as a system/build foundation.")
@@ -208,11 +218,21 @@ def preview(store, key):
         except ValueError as error:
             issues.append(str(error))
             tools = None
-        for role in ("SDK", "Contract") if tools else ():
-            source = tools["sources"][role]
-            repo = repos.get(source["repository"])
-            if repo and repo["local"].get("commit") != source["commit"]:
-                issues.append(role + ": the selected source revision differs from the active toolset. Update Tools or activate the matching toolset.")
+        if tools:
+            from . import sdk_packages, profiles, toolsets
+            package=sdk_packages.get(store,tools['sdk_id'])
+            paths=toolsets.package_paths(store,tools)
+            for role, key in (('SDK','sdk'),('Contract','contract'),('Libraries','libraries')):
+                repo=main.get('r4os-'+key)
+                if not repo:continue
+                source=package['manifest']['sdk_source'] if key=='sdk' else package['manifest']['sources'][key]
+                modules=profiles.scan(paths[role],repo['display_name'],archive=True)['modules'] if key=='libraries' else []
+                for module in modules:
+                    offered=[name for name,p in package['manifest']['profiles'].items() if p['language']==module['language'] and p['role']==('native' if module['id'].startswith('native-') else 'module')]
+                    if len(offered)!=1:module.update(supported=False,reason='No unambiguous SDK profile.')
+                    else:module.update(supported=True,validated=True,sdk_profile=sdk_packages.provenance(package,offered[0]))
+                repos[repo['name']]=dict(repo,local=dict(repo['local'],commit=source['commit'],dirty=False,modules=modules))
+            if 'limine' not in tools['installed_tools']:issues.append('Set up the SDK limine tool before building release images.')
     for name, selection in release["members"].items():
         if not selection.get("selected"):
             continue
@@ -229,7 +249,7 @@ def preview(store, key):
         for module in repo["local"].get("modules", []):
             if wanted and module["id"] not in wanted:
                 continue
-            if module.get("kind") == "HostTools":
+            if module.get("kind") in ("HostTools", "Native"):
                 continue
             if module["id"] == "recovery":
                 issues.append("Recovery is included through the validated package from the Distribution pin. Build the recovery kernel individually and deselect it as an image component here.")
@@ -238,6 +258,7 @@ def preview(store, key):
             component = dict(module, repository=name, commit=repo["local"]["commit"], source_ids={})
             components.append(component)
             for dependency in module.get("source_repositories", []):
+                if dependency in ("r4os-sdk","r4os-contract","r4os-libraries"):continue
                 try:
                     source = store.source_repository(dependency, repo["connection_id"])
                 except ValueError:
@@ -274,7 +295,7 @@ def preview(store, key):
             if provider and "exports" in provider and len(parts) >= 3:
                 exports = {item.split(":")[0]: int(item.split(":")[2]) for item in provider["exports"] if len(item.split(":")) >= 3}
                 if exports.get(parts[1], 0) < int(parts[2]):
-                    issues.append(module["id"] + " requires " + parts[0] + ":" + parts[1] + " mindestens ABI " + parts[2] + ".")
+                    issues.append(module["id"] + " requires " + parts[0] + ":" + parts[1] + " with minimum ABI " + parts[2] + ".")
     from . import testconfigs
     frozen_tests = None
     try:

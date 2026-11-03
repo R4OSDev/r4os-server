@@ -581,7 +581,7 @@ sys.exit(result.returncode)
         if attached:
             self.assertEqual(testconfigs.get(self.store, attached["test_configuration"])["id"], config["id"])
 
-    def test_library_recipe_uses_raw_git_blob_without_changing_checkout(self):
+    def test_git_snapshots_preserve_owner_line_endings_and_checkout(self):
         source = self.root / "upstream"
         source.mkdir()
         def git(*args):
@@ -600,11 +600,9 @@ sys.exit(result.returncode)
         context = self.context()
         destination = self.store.root / "Repositories/Libraries"
         clone_snapshot(context, source, destination, git("rev-parse", "HEAD").decode().strip())
-        private_libraries(context, self.store.root, self.root / "tools")
-        self.assertEqual((destination / "Recipe.ps1").read_bytes(), canonical)
+        self.assertEqual((destination / "Recipe.ps1").read_bytes().replace(b"\r\n",b"\n"), canonical)
         self.assertIn(b"\r\n", (source / "Recipe.ps1").read_bytes())
-        record = json.loads((self.store.root / "Generated/library-script-sources.json").read_text())
-        self.assertEqual(record["files"]["Recipe.ps1"]["git_blob"], hashlib.sha256(canonical).hexdigest())
+        self.assertFalse((self.store.root/'Generated/library-script-sources.json').exists())
 
     def test_timeout_stops_orphaned_process_group_and_closed_output(self):
         marker = self.root / "descendant.json"

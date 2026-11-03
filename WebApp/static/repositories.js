@@ -1,6 +1,6 @@
 "use strict";
 (() => {
-  const U=window.R4,E=U.esc,api=(path,options)=>U.api('repositories/'+path,options);
+  const U=window.R4,E=U.esc,api=(path,options)=>U.api('repositories/'+path,options),sdk=(path,options)=>U.api('sdk/'+path,options);
   const states={missing:'Not downloaded',current:'Up to date',outdated:'Update available',modified:'Locally modified',diverged:'Different branch',ahead:'Local commits',unknown:'Status unknown',empty:'Empty repository',conflict:'Local conflict',queued:'Queued',running:'Running',completed:'Completed',failed:'Failed',cancelled:'Cancelled',interrupted:'Interrupted'};
   let filter='',category='',account='',lastState=null,dialogJob=null,dialogOffset=0,dialogText='',dialogGeneration=0,dialogTrigger=null;
   const active=job=>['queued','running'].includes(job.status);
@@ -116,6 +116,8 @@
     if(local.changes?.length)html+=U.fold('Local changes',local.changes);
     if(value.last_success)html+='<h3>Last successful build</h3>'+button('Artefacts and log','job',value.last_success.id);
     html+='<h3>Recent jobs and builds</h3>'+jobRows(value.jobs);
+    const options=await sdk('projects/'+encodeURIComponent(repo.name)),packages=await sdk('catalog');
+    html+='<h3>SDK build settings</h3><form id="sdk-project" data-name="'+E(repo.name)+'"><label>SDK<select name="sdk_id"><option value="">Active SDK</option>'+packages.packages.map(item=>'<option value="'+E(item.id)+'"'+(options.sdk_id===item.id?' selected':'')+'>'+E(item.version)+'</option>').join('')+'</select></label><label>Additional library pins (JSON)<textarea name="libraries" rows="5">'+E(JSON.stringify(options.libraries,null,2))+'</textarea></label><p class="muted">Each entry needs id, managed repository and commit (optional path), or path and a complete SDK tree pin. SDK system identities cannot be replaced.</p><label>Technical development snapshot ID (optional)<input name="development_id" value="'+E(options.development_id||'')+'"></label><button class="button" type="submit">Save SDK settings</button><p class="form-message" role="alert"></p></form>';
     U.open(repo.display_name||repo.name,html);
   }
   async function showJob(id,reset=true){
@@ -137,13 +139,23 @@
     if(active(job))setTimeout(()=>{if(dialogJob===id&&document.querySelector('#detail-dialog[open]'))showJob(id,false).catch(error=>U.status(error.message,true));},1500);
   }
   async function tools(ctx){
-    const value=await api('tools');if(ctx.generation!==U.generation)return;
-    let html='<div class="metric-grid">'+U.card('Active toolset',value.active||'Not configured')+U.card('Installed toolsets',U.count(value.toolsets.length))+U.card('Host',value.host)+'</div>';
-    html+='<section class="panel"><div class="panel-heading"><h2>Build environment</h2></div>'+U.table(['Component','Required / available','Installed / path','State','Action'],value.components.map(item=>[E(item.name),E(item.required||'From project settings'),E(item.installed||'—')+'<small class="muted">'+E(item.path||'')+'</small>',E(item.state||'Not configured')+(item.in_use?' · In use':''),item.host?'Host prerequisite':button('Check','tools_check_component',item.id)+button(item.installed?'Refresh':'Set up',item.installed?'tools_update_component':'tools_install_component',item.id)]))+'</section>';
+    const value=await sdk('tools');if(ctx.generation!==U.generation)return;
+    const ready=value.packages.filter(item=>item.status==='ready');
+    let html='<section class="panel panel-body"><h2>SDK packages</h2><p>The SDK selects build profiles, exact tools, Contract and system libraries. Package originals are immutable.</p><form id="sdk-import"><label>Official SDK release URL<input name="release_url" type="url" required placeholder="https://github.com/R4OSDev/r4os-sdk/releases/tag/v0.64.145"></label><button class="button primary" type="submit">Import and verify SDK</button><p class="form-message" role="alert"></p></form></section>';
+    html+='<section class="panel panel-body"><h2>Build environment</h2><p>Host: '+E(value.host)+' · Active SDK: '+E(value.sdk?.version||'Not configured')+'</p><form id="sdk-setup"><label>Verified SDK<select name="sdk_id" required>'+ready.map(item=>'<option value="'+E(item.id)+'"'+(item.id===value.sdk?.id?' selected':'')+'>'+E(item.version+' · '+item.source.commit.slice(0,12))+'</option>').join('')+'</select></label><fieldset><legend>SDK-owned setup</legend>'+['zig','rust','limine','qemu'].map(name=>'<label><input type="checkbox" name="tools" value="'+name+'"'+(['zig','rust'].includes(name)?' checked':'')+'> '+E(name)+'</label>').join('')+'</fieldset><p class="muted">Graphics, shader and platform prerequisites are verified by their native owner builders.</p><button type="submit" class="button primary"'+(!ready.length?' disabled':'')+'>Set up and activate</button> '+button('Check active environment','tools_check','',!value.active)+'<p class="form-message" role="alert"></p></form>'+U.table(['Tool','SDK requirement','Installed','State'],value.components.map(item=>[E(item.name),E(item.required),E(item.installed||'—'),E(item.state)]))+'</section>';
     if(value.errors?.length)html+='<p class="workspace-notice">'+E(value.errors.join(' · '))+'</p>';
-    html+='<section class="panel"><div class="panel-heading"><h2>Toolsets</h2></div>'+(value.toolsets.length?U.table(['Toolset','Status','Action'],value.toolsets.map(item=>[E(item.id),E(item.id===value.active?'Active':item.status),button('Activate','tools_activate',item.id,item.id===value.active||item.status!=='ready')])):U.empty('No build environment yet','“Set up” downloads a matching toolset and builds the required HostTools.'))+'</section>';
-    html+='<p><a class="artifact-link" href="#repositories/logs/tools">Open jobs and logs</a></p>';
-    U.page(ctx,'Tools','',html,button('Check','tools_check')+button(value.active?'Refresh':'Set up',value.active?'tools_update':'tools_install','',false,true));
+    for(const item of value.packages){
+      html+='<section class="panel panel-body"><h2>SDK '+E(item.version)+'</h2><p>'+E(item.status)+(item.error?' · '+E(item.error):'')+'</p><p><code>'+E(item.id)+'</code><br>Source: '+E(item.source.commit)+'</p>';
+      if(item.status==='ready'){
+        html+=button('Verify package','sdk_verify',item.id)+U.table(['Profile','Language / role','Tools / components','Action'],Object.entries(item.profiles).map(([id,profile])=>[E(id),E(profile.language+' / '+profile.role),E(profile.toolset+' / '+profile.components),button('Describe','sdk_describe',item.id+'|'+id)+button('Resolve','sdk_resolve',item.id+'|'+id)]));
+        html+=U.fold('Original profile hashes',item.profile_sources)+U.table(['Original asset','Role','Bytes','Download'],item.assets.map(asset=>[E(asset.path),E(asset.role),U.bytes(asset.bytes),'<a class="artifact-link" href="/api/sdk/assets/'+E(item.id)+'/'+E(asset.path)+'">Download</a>']));
+      }
+      html+='</section>';
+    }
+    html+='<section class="panel panel-body"><h2>Installed SDK environments</h2>'+U.table(['Environment','Status','Action'],value.toolsets.map(item=>[E(item.id),E(item.id===value.active?'Active':item.status),button('Activate','tools_activate',item.id,item.id===value.active||item.status!=='ready')]))+'</section>';
+    html+='<section class="panel panel-body"><h2>Technical development snapshot</h2><p>An explicit snapshot pins managed SDK, Contract and Libraries sources. Changed sources make the snapshot stale. Technical builds cannot be published as qualified releases.</p><form id="sdk-development"><label>SDK<select name="sdk_id">'+ready.map(item=>'<option value="'+E(item.id)+'">'+E(item.version)+'</option>').join('')+'</select></label><label>Profile<select name="profile">'+[...new Set(ready.flatMap(item=>Object.keys(item.profiles)))].map(id=>'<option>'+E(id)+'</option>').join('')+'</select></label>'+['sdk','contract','libraries'].map(role=>'<label>'+E(role)+' repository ID<input name="'+role+'_repository" required placeholder="r4os-'+role+'"></label>').join('')+'<button class="button" type="submit">Create technical snapshot</button><p class="form-message" role="alert"></p></form></section>';
+    html+='<section class="panel panel-body"><h2>Obsolete installations</h2><p>After SDK verification, remove obsolete local build environments. Historical receipts and application data are retained.</p>'+button('Remove obsolete installations','sdk_cleanup','',!value.active)+'</section>'+jobRows(value.jobs);
+    U.page(ctx,'Tools','',html);
     if(value.jobs.some(active))U.poll=setTimeout(()=>{if(ctx.generation===U.generation&&!document.querySelector('#detail-dialog[open]'))refreshPage(ctx);},2500);
   }
 
@@ -284,12 +296,27 @@
         return;
       }
       let job;
-      if(action.startsWith('tools_'))job=await api('tools/actions/'+action.slice(6).replace('_component',''),{method:'POST',body:action.endsWith('_component')?{component:name}:{id:name||undefined}});
+      if(action==='sdk_verify'){job=await sdk('packages/'+name+'/verify',{method:'POST',body:{}});}
+      else if(action==='sdk_describe'||action==='sdk_resolve'){const [id,profile]=name.split('|');job=await sdk('profiles/'+id+'/'+action.slice(4),{method:'POST',body:{profile}});}
+      else if(action==='sdk_cleanup'){if(!window.confirm('Remove inventoried obsolete local SDK installations after verification?'))return;job=await sdk('cleanup',{method:'POST',body:{confirmed:true}});}
+      else if(action.startsWith('tools_'))job=await api('tools/actions/'+action.slice(6).replace('_component',''),{method:'POST',body:action.endsWith('_component')?{component:name}:{id:name||undefined}});
       else job=await api('actions/'+action,{method:'POST',body:{name:name||undefined}});
       await showJob(job.id);U.status('Job started.');
     }catch(error){U.status(error.message,true);}finally{node.disabled=false;}
   });
   document.addEventListener('submit',async event=>{
+    if(['sdk-import','sdk-setup','sdk-project','sdk-development'].includes(event.target.id)){
+      event.preventDefault();const form=event.target,submit=form.querySelector('[type=submit]'),values=new FormData(form);submit.disabled=true;
+      try{
+        let job;
+        if(form.id==='sdk-import')job=await sdk('imports',{method:'POST',body:{release_url:values.get('release_url')}});
+        else if(form.id==='sdk-setup')job=await api('tools/actions/install',{method:'POST',body:{sdk_id:values.get('sdk_id'),tools:values.getAll('tools')}});
+        else if(form.id==='sdk-development')job=await sdk('development',{method:'POST',body:Object.fromEntries(values)});
+        else{await sdk('projects/'+encodeURIComponent(form.dataset.name),{method:'PUT',body:{sdk_id:values.get('sdk_id')||null,libraries:JSON.parse(values.get('libraries')),development_id:values.get('development_id')||null}});U.status('SDK settings saved.');return;}
+        await showJob(job.id);
+      }catch(error){form.querySelector('.form-message').textContent=error.message;}finally{submit.disabled=false;}return;
+    }
+
     if(event.target.id==='repository-metadata'){
       event.preventDefault();const form=event.target,submit=form.querySelector('[type=submit]');submit.disabled=true;
       try{

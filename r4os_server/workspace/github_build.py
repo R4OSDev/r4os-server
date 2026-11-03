@@ -23,11 +23,21 @@ def initialize(db):
         signature TEXT NOT NULL, checked_at REAL NOT NULL, payload TEXT NOT NULL)''')
 
 
-def signature(repo, connection):
+def build_contract(payload):
+    return {key: payload.get(key, [] if key == 'additional_libraries' else {} if key == 'source_dependencies' else None)
+            for key in ('sdk_profile','additional_libraries','source_dependencies','development_id')}
+
+
+def signature(repo, connection, store=None):
     value = {'id': repo['id'], 'owner': repo['owner'], 'repo': repo['display_name'], 'revision': connection['revision'],
              'commit': repo['local'].get('commit'), 'branch': repo['local'].get('branch'),
              'default_branch': repo.get('default_branch', ''), 'dirty': repo['local'].get('dirty'),
              'targets': [(m['id'], m['version'], m.get('supported'), m.get('manifest')) for m in build_targets.targets(repo)]}
+    if store is not None:
+        from . import sdk_projects
+        value['sdk'] = store.setting('active_sdk')
+        value['options'] = sdk_projects.get(store, repo['name'])
+    value['profiles'] = [m.get('sdk_profile') for m in build_targets.targets(repo)]
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
 
 
@@ -52,7 +62,7 @@ def marker(release):
     except (ValueError, IndexError): return {}
 
 
-def verify_receipt(client, repo, module, commit, release):
+def verify_receipt(client, repo, module, commit, release, contract=None):
     assets = client.assets(release)
     names = [asset['name'] for asset in assets]
     if len(names) != len(set(names)):
@@ -64,9 +74,13 @@ def verify_receipt(client, repo, module, commit, release):
     try: receipt = json.loads(client.asset_bytes(asset))
     except (ValueError, UnicodeError): raise Conflict('The release build receipt is invalid.') from None
     if not isinstance(receipt, dict): raise Conflict('The release build receipt must be an object.')
-    for key, expected in (('schema', 1), ('repository_id', repo['id']), ('target', module['id']), ('version', module['version']), ('commit', commit)):
+    for key, expected in (('schema', 2), ('repository_id', repo['id']), ('target', module['id']), ('version', module['version']), ('commit', commit)):
         if receipt.get(key) != expected:
             raise Conflict('This release belongs to a different source or target. Increase the manifest version.')
+    proof = receipt.get('sdk_profile', {})
+    if (not proof.get('sdk_id') or not proof.get('profile_sources') or receipt.get('technical') is not False
+            or (contract is not None and build_contract(receipt) != contract)):
+        raise Conflict('This release has no matching verified SDK build. Increase the manifest version.')
     files = receipt.get('assets')
     if not isinstance(files, list) or not files:
         raise Conflict('The release build receipt has no artifact list.')
@@ -87,7 +101,7 @@ def verify_receipt(client, repo, module, commit, release):
     return receipt
 
 
-def inspect_release(client, repo, module, commit):
+def inspect_release(client, repo, module, commit, contract=None):
     tag = 'v'+module['version']
     tagged = client.tag_commit(tag)
     release = client.request('GET', '/releases/tags/'+quote(tag, safe=''), missing=True)
@@ -99,21 +113,21 @@ def inspect_release(client, repo, module, commit):
         raise GitHubFailure(502, 'GitHub returned a different release tag.')
     if release.get('draft'):
         owned = marker(release)
-        if all(owned.get(key) == expected for key, expected in (('repository_id', repo['id']), ('commit', commit), ('target', module['id']), ('version', module['version']))):
+        if owned.get('schema') == 2 and owned.get('build_contract') == contract and all(owned.get(key) == expected for key, expected in (('repository_id', repo['id']), ('commit', commit), ('target', module['id']), ('version', module['version']))):
             return state('ready', 'Resume the unfinished release upload.', tag=tag)
         return state('conflict', 'This tag is reserved by another release draft. Increase the manifest version.', tag=tag)
     if tagged != commit:
         return state('conflict', 'The release tag cannot be verified. Increase the manifest version.', tag=tag)
-    try: verify_receipt(client, repo, module, commit, release)
+    try: verify_receipt(client, repo, module, commit, release, contract)
     except Conflict as error: return state('conflict', str(error), tag=tag)
     return state('published', PUBLISHED, tag=tag, release_id=release['id'], release_url=release_url(repo, tag))
 
 
 def persist(store, repo, connection, payload):
-    key = signature(repo, connection)
+    key = signature(repo, connection, store)
     current = store.repository(repo['name'])
     latest = connections.get(store, current['connection_id'])
-    if signature(current, latest) != key: return
+    if signature(current, latest, store) != key: return
     with store.connect() as db:
         db.execute('''INSERT INTO github_release_status VALUES(?,?,?,?) ON CONFLICT(repository_name)
                       DO UPDATE SET signature=excluded.signature,checked_at=excluded.checked_at,payload=excluded.payload''',
@@ -142,7 +156,9 @@ def refresh(context, name):
                 pinned = build_targets.pinned(store, repo, module, repo['local']['commit'])
                 if pinned['version'] != module['version']:
                     item = state('blocked', 'Refresh repository metadata before building.')
-                else: item = inspect_release(client, repo, pinned, repo['local']['commit'])
+                else:
+                    _, selected = builds.inputs(store, {'name': name, 'target': pinned['id']})
+                    item = inspect_release(client, repo, pinned, repo['local']['commit'], build_contract(selected))
             result['targets'].append(dict(item, id=module['id'], version=module['version']))
     except (GitHubFailure, ValueError, KeyError) as error:
         result['targets'] = [dict(state('unknown', str(error)), id=module['id'], version=module['version']) for module in modules]
@@ -160,7 +176,7 @@ def view(store, repo, *, schedule=False, force=False):
     elif repo['local'].get('branch') != repo.get('default_branch'): reason = 'Use the repository default branch before building.'
     elif not modules: reason = 'This repository has no supported production build target.'
     elif not connection['has_token']: reason = 'Add a GitHub token with Contents write access to this connection.'
-    key = signature(repo, connection)
+    key = signature(repo, connection, store)
     with store.connect() as db:
         row = db.execute('SELECT * FROM github_release_status WHERE repository_name=?', (repo['name'],)).fetchone()
         running = db.execute("SELECT id FROM jobs WHERE kind='build_publish' AND subject=? AND status IN ('queued','running') AND cancel=0", (repo['name'],)).fetchone()
@@ -175,9 +191,10 @@ def view(store, repo, *, schedule=False, force=False):
         if not pending:
             store.enqueue('github_status', repo['name'], {'signature': key, 'connection_id': repo['connection_id']})
     cached = {item['id']: item for item in data.get('targets', [])} if valid and not force else {}
-    try: builds.active(store)
-    except ValueError as error: tools_error = str(error)
-    else: tools_error = ''
+    tools_error = ''
+    if not reason and modules:
+        try: builds.active(store)
+        except ValueError as error: tools_error = str(error)
     result = []
     for module in modules:
         item = cached.get(module['id'], state('checking', 'Checking GitHub release status…'))
@@ -203,6 +220,7 @@ def enqueue(store, value):
     if not isinstance(value, dict) or set(value) != {'name', 'target'}:
         raise ValueError('Choose a repository and build target.')
     repo, payload = builds.inputs(store, value)
+    if payload.get('development_id'): raise Conflict('Technical development builds cannot be published as qualified releases.')
     selected = next((m for m in build_targets.targets(repo) if m['id'] == payload['target']), None)
     if selected is None: raise ValueError('Choose a production build target.')
     module = build_targets.pinned(store, repo, payload['module'], payload['commit'])
@@ -246,6 +264,8 @@ def reusable(store, name, payload):
 
 
 def upload_files(store, repo, module, payload, local):
+    if local.get('technical') or local.get('sdk_profile') != payload.get('sdk_profile'):
+        raise Conflict('The local build has no matching qualified SDK proof.')
     folder = under(store.root, local['output'])/'files'
     files = {path.name: path for path in sorted(folder.iterdir()) if path.is_file() and not path.is_symlink()}
     if not files: raise ValueError('No local target artifact is available for upload.')
@@ -254,9 +274,10 @@ def upload_files(store, repo, module, payload, local):
     checksums.write_text(''.join(builds.digest(path)+'  '+name+'\n' for name, path in files.items()))
     if checksums.name in files: raise ValueError('An artifact collides with the checksum filename.')
     files[checksums.name] = checksums
-    receipt = {'schema': 1, 'repository_id': repo['id'], 'target': module['id'], 'version': module['version'],
+    receipt = {'schema': 2, 'repository_id': repo['id'], 'target': module['id'], 'version': module['version'],
                'commit': payload['commit'], 'fingerprint': payload['fingerprint'], 'toolset': payload['toolset'],
-               'source_dependencies': payload['source_dependencies'],
+               'source_dependencies': payload['source_dependencies'], 'sdk_profile': payload['sdk_profile'],
+               'additional_libraries': payload.get('additional_libraries', []), 'development_id': None, 'technical': False,
                'assets': [{'name': name, 'size': path.stat().st_size, 'sha256': builds.digest(path)} for name, path in files.items()]}
     path = pending/receipt_name(module)
     path.write_text(json.dumps(receipt, sort_keys=True, separators=(',', ':'))+'\n')
@@ -276,12 +297,14 @@ def run(context, name, payload):
             raise Conflict('The GitHub connection changed. Start a new build after refreshing it.')
         return current, connection
     with publication_lock(context, name):
+        if not payload.get('sdk_profile') or payload.get('development_id'):
+            raise Conflict('Start a new qualified SDK build.')
         repo, connection = bound()
         module = build_targets.pinned(store, repo, payload['module'], payload['commit'])
         client = Client(repo, connections.token(store, repo['connection_id']), bound)
         tag = 'v'+module['version']
         context.phase('Checking release '+tag)
-        before = inspect_release(client, repo, module, payload['commit'])
+        before = inspect_release(client, repo, module, payload['commit'], build_contract(payload))
         if before['state'] == 'conflict': raise Conflict(before['reason'])
         if before['state'] == 'published':
             return {'github_release': dict(before, published=True), 'files': []}
@@ -293,13 +316,13 @@ def run(context, name, payload):
         bound()
         files = upload_files(store, repo, module, payload, local)
         context.phase('Preparing GitHub release '+tag)
-        current = inspect_release(client, repo, module, payload['commit'])
+        current = inspect_release(client, repo, module, payload['commit'], build_contract(payload))
         if current['state'] == 'published':
             result['github_release'] = dict(current, published=True)
             store.change_job(context.job['id'], result=result)
             return result
         if current['state'] == 'conflict': raise Conflict(current['reason'])
-        owned = {'schema': 1, 'repository_id': repo['id'], 'target': module['id'], 'version': module['version'],
+        owned = {'schema': 2, 'build_contract': build_contract(payload), 'repository_id': repo['id'], 'target': module['id'], 'version': module['version'],
                  'commit': payload['commit'], 'fingerprint': payload['fingerprint']}
         release = client.request('GET', '/releases/tags/'+quote(tag, safe=''), missing=True)
         if release is None:
@@ -335,7 +358,7 @@ def run(context, name, payload):
                 if not asset or asset.get('state') != 'uploaded' or int(asset['size']) != path.stat().st_size or client.asset_digest(asset) != expected:
                     raise Conflict('Another upload occupies this asset name; nothing was overwritten.') from None
         context.phase('Verifying release assets')
-        verify_receipt(client, repo, module, payload['commit'], release)
+        verify_receipt(client, repo, module, payload['commit'], release, build_contract(payload))
         tagged = client.tag_commit(tag)
         if tagged is not None and tagged != payload['commit']:
             raise Conflict('The release tag changed during upload. Nothing was published.')
@@ -344,10 +367,11 @@ def run(context, name, payload):
         if final.get('draft') is not False: raise GitHubFailure(502, 'GitHub did not confirm release publication.')
         # Cancellation after this confirmed external action cannot undo a release.
         client.check = lambda: bound(False)
-        confirmed = inspect_release(client, repo, module, payload['commit'])
+        confirmed = inspect_release(client, repo, module, payload['commit'], build_contract(payload))
         if confirmed['state'] != 'published': raise Conflict('GitHub publication could not be verified. Retry to inspect the existing release.')
         result['github_release'] = dict(confirmed, published=True)
         store.change_job(context.job['id'], result=result)
-        if repo['local'].get('commit') == payload['commit']:
+        _, current_inputs = builds.inputs(store, {'name': name, 'target': module['id']})
+        if repo['local'].get('commit') == payload['commit'] and build_contract(current_inputs) == build_contract(payload):
             persist(store, repo, connection, {'remote_commit': payload['commit'], 'targets': [dict(confirmed, id=module['id'], version=module['version'])]})
         return result

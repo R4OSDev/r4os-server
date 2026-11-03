@@ -7,6 +7,7 @@ After=network-online.target r4os-registration.service
 Type=simple
 User=r4os-server
 Group=r4os-server
+SupplementaryGroups=r4os-workspace
 WorkingDirectory=/opt/r4os-server
 Environment=R4OS_SERVER_CONFIG=/etc/r4os-server/server.json
 Environment=PYTHONUNBUFFERED=1

@@ -172,6 +172,9 @@ class WebAppHandler(Handler):
             if path.startswith("/api/apps/"):
                 from r4os_server.workspace.apps import dispatch
                 return dispatch(self)
+            if path.startswith('/api/sdk/'):
+                from r4os_server.workspace.sdk_api import dispatch
+                return dispatch(self)
             if path.startswith(("/api/updates/", "/api/settings/", "/api/benchmarks/")):
                 return self.proxy(config)
             raise HTTPError(404, "not_found")

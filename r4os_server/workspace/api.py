@@ -18,7 +18,7 @@ def data(handler):
     return value
 
 
-def file_response(handler, path, name):
+def file_response(handler, path, name, *, immutable=False, etag=None):
     if not path.is_file():
         raise HTTPError(404, "output_missing", "The local output file is missing.")
     size, start, end = path.stat().st_size, 0, path.stat().st_size - 1
@@ -40,7 +40,8 @@ def file_response(handler, path, name):
     handler.send_header("Accept-Ranges", "bytes")
     if status == 206:
         handler.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Cache-Control", "public, max-age=31536000, immutable" if immutable else "no-store")
+    if etag: handler.send_header('ETag','"'+etag+'"')
     handler.send_header("X-Content-Type-Options", "nosniff")
     handler.end_headers()
     if handler.command != "HEAD":

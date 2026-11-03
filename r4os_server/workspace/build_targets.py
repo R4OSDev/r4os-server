@@ -71,4 +71,7 @@ def fingerprint(payload):
     import hashlib
     value = {key: payload[key] for key in ('target', 'commit', 'toolset', 'source_dependencies')}
     value['version'] = payload['module']['version']
+    value['sdk_profile'] = payload.get('sdk_profile')
+    value['additional_libraries'] = payload.get('additional_libraries', [])
+    value['development_id'] = payload.get('development_id')
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()

@@ -4,10 +4,8 @@ import json
 from pathlib import Path
 import re
 import shutil
-import zipfile
 
-from . import builds, catalog, releases, testconfigs
-from .profiles import fields
+from . import builds, catalog, releases, testconfigs, sdk_packages, toolsets
 from .store import identifier, now, under
 from .toolsets import active, clone_snapshot, digest, download, write_json
 
@@ -28,6 +26,8 @@ def enqueue(store, key, value):
     if REQUIRED_BOOT - names:
         raise ValueError("Required boot components are missing: " + ", ".join(sorted(REQUIRED_BOOT - names)))
     tools_root, tools = active(store)
+    if any(m.get("sdk_profile",{}).get("sdk_id")!=tools["sdk_id"] for m in view["components"]):
+        raise ValueError("Refresh selected repositories with the active SDK before building an image.")
     sources = {}
     for name, member in release["members"].items():
         if not member.get("selected"):
@@ -35,10 +35,16 @@ def enqueue(store, key, value):
         repo = store.require_repository(name)
         if not repo["local"].get("commit"):
             raise ValueError(name + ": source revision is missing.")
-        sources[name] = repo["local"]["commit"]
+        bound_role={'r4os-sdk':'sdk','r4os-contract':'contract','r4os-libraries':'libraries'}.get(repo['display_name'])
+        if bound_role:
+            package=sdk_packages.get(store,tools['sdk_id'])
+            bound=package['manifest']['sdk_source'] if bound_role=='sdk' else package['manifest']['sources'][bound_role]
+            sources[name]=bound['commit']
+        else:sources[name]=repo['local']['commit']
     payload = {"release": release, "version": version, "sources": sources,
                "components": view["components"], "toolset": tools["id"], "source_dependencies": view["build_dependencies"],
-               "test_configuration": view["test_configuration"], "main_sources": view["main_sources"]}
+               "test_configuration": view["test_configuration"], "main_sources": view["main_sources"],
+               "sdk_id":tools["sdk_id"], "sdk_profile":sdk_packages.provenance(sdk_packages.get(store,tools["sdk_id"]))}
     with store.connect() as db:
         db.execute("BEGIN IMMEDIATE")
         if releases.get_type(store, key, connection=db)["revision"] != release["revision"]:
@@ -61,87 +67,33 @@ def replace_function(source, name, replacement):
 
 
 def boot_tools(context, tools):
-    source = (tools / "DevKit/Setup/Setup.ps1").read_text()
-    match = re.search(r"\$url\s*=\s*'(https://github.com/Limine-Bootloader/[^']+)'\s*\n\s*\$hash\s*=\s*'([a-f0-9]{64})'", source)
-    if not match:
-        raise ValueError("The pinned Limine source could not be read from the DevKit.")
-    url, checksum = match.groups()
-    root = context.store.root / "BuildTools/Boot" / checksum[:16]
-    ready = root / "limine-bios.sys"
-    if ready.is_file() and (root / "BOOTX64.EFI").is_file():
-        context.store.set("boot_tools", {"path": str(root.relative_to(context.store.root)), "version": Path(url).name, "sha256": checksum})
-        return root, {"url": url, "sha256": checksum}
-    archive = download(context, url, context.store.root / "BuildTools/Downloads" / Path(url).name, checksum)
-    stage = root.with_name(root.name + "-staging")
-    if stage.exists():
-        shutil.rmtree(stage)
-    stage.mkdir(parents=True)
-    with zipfile.ZipFile(archive) as zipped:
-        for entry in zipped.infolist():
-            if Path(entry.filename).is_absolute() or ".." in Path(entry.filename).parts:
-                raise ValueError("Unsicherer Pfad im Limine-Archiv.")
-        zipped.extractall(stage)
-    content = next(path for path in stage.iterdir() if path.is_dir())
-    context.phase("Preparing the pinned Limine host tool")
-    context.run(["make", "-C", content], timeout=600)
-    if root.exists():
-        shutil.rmtree(root)
-    content.rename(root)
-    stage.rmdir()
-    if not ready.is_file() or not (root / "BOOTX64.EFI").is_file():
-        raise ValueError("Limine boot files are missing after preparation.")
-    context.store.set("boot_tools", {"path": str(root.relative_to(context.store.root)), "version": Path(url).name, "sha256": checksum})
-    return root, {"url": url, "sha256": checksum}
+    manifest=sdk_packages.strict_json((tools/'toolset.json').read_bytes())
+    toolsets.run_setup(context,manifest['sdk_id'],tools/'Install',['limine'],check=True)
+    package=sdk_packages.get(context.store,manifest['sdk_id'])
+    return tools/'Install/Boot/Limine', package['manifest']['tools']['limine']
 
 
 def selection_catalog(context, tools, root, components):
-    """Adapt only image selection; retain the SDK parser, ABI and inventories."""
-    sdk = tools / "Repositories/SDK"
-    variant = root / "Adapters/SDK"
-    shutil.copytree(sdk, variant, ignore=shutil.ignore_patterns(".git", ".zig-cache", "zig-out", "__pycache__"))
-    path = variant / "Tools/ModuleCatalog/src/main.zig"
-    source = path.read_text()
-    targets = sorted({module["target"] for module in components if module.get("target")})
-    literals = ",\n        ".join(json.dumps(target, ensure_ascii=True) for target in targets)
-    replacement = """fn imageEntryIncluded(entry: manifest_contract.Manifest, mode: ImageMode, include_targets: []const []const u8) bool {
-    _ = mode;
-    _ = include_targets;
-    if (entry.version != manifest_contract.manifest_version) return false;
-    const selected = [_][]const u8{
-        """ + literals + """
-    };
-    for (selected) |target| {
-        if (std.ascii.eqlIgnoreCase(entry.target, target)) return true;
-    }
-    return false;
-}"""
-    adapted, count = re.subn(r"(?ms)^fn imageEntryIncluded\([^\n]+\) bool \{.*?^\}", lambda _: replacement, source)
-    if count != 1:
-        raise ValueError("The SDK selection adapter does not match the selected source revision.")
-    path.write_text(adapted)
-    output = root / "Adapters/HostTools"
-    context.phase("Building the release selection adapter with unchanged manifest validation")
-    context.run([tools / "DevKit/Toolchains/Zig/zig", "build", "-j2", "-Dcatalog-only=true",
-                 "--fork=" + str(tools / "Repositories/Contract"), "--prefix", output,
-                 "--cache-dir", context.store.root / "BuildTools/Cache/Zig/Release-Adapter",
-                 "--global-cache-dir", context.store.root / "BuildTools/Cache/Zig/Global"], cwd=variant, timeout=1800)
-    return output / "bin/module-catalog", {"source_sha256": hashlib.sha256(source.encode()).hexdigest(),
-                                            "adapter_sha256": digest(path), "selection": targets}
+    # Image selection is a workspace map plus the official include-target API.
+    # The SDK catalog binary and source remain byte-identical to the package.
+    paths=toolsets.package_paths(context.store,sdk_packages.strict_json((tools/'toolset.json').read_bytes()))
+    profile=sdk_packages.strict_json((paths['HostTools']/'RustToolsProfile.json').read_bytes())
+    executable=paths['HostTools']/profile['hosts']['Linux']['catalog']
+    return executable, {'catalog_sha256':digest(executable),'selection':sorted({m['target'] for m in components if m.get('target')})}
 
 
-def project_adapter(root, tool, map_path):
+def project_adapter(root, tool, map_path, targets):
     script = root / "Tools/BuildWorkspace.ps1"
     source = script.read_text()
     source = replace_function(source, "Ensure-ModuleCatalog", "function Ensure-ModuleCatalog {\n    $script:moduleCatalogExe = " + ps_string(tool) + "\n}")
     source = replace_function(source, "Write-WorkspaceMap", "function Write-WorkspaceMap {\n    [IO.Directory]::CreateDirectory($distributionInputRoot) | Out-Null\n    Copy-Item -LiteralPath " + ps_string(map_path) + " -Destination $workspaceMapPath -Force\n}")
-    source = replace_function(source, "Get-ImageSelectionArguments", """function Get-ImageSelectionArguments([string]$SelectedProfile, [switch]$IncludeBrowserTest) {
-    return @('--workspace-map', $workspaceMapPath, '--image-mode', $SelectedProfile.ToLowerInvariant())
-}""")
+    arguments="@('--workspace-map', $workspaceMapPath, '--image-mode', $SelectedProfile.ToLowerInvariant()"+''.join(", '--include-target', "+ps_string(target) for target in targets)+")"
+    source = replace_function(source, "Get-ImageSelectionArguments", "function Get-ImageSelectionArguments([string]$SelectedProfile, [switch]$IncludeBrowserTest) {\n    return "+arguments+"\n}")
     script.write_text(source)
     return digest(script)
 
 
-def distribution_adapter(root, components, test_overlay=None, *, preserve_legacy=False):
+def distribution_adapter(root, components, test_overlay=None):
     """Apply corresponding-source requirements to the actual module selection."""
     script = root / "Repositories/Distribution/Tools/Distribution.ps1"
     source = script.read_text()
@@ -159,11 +111,10 @@ def distribution_adapter(root, components, test_overlay=None, *, preserve_legacy
     function = first_line + "\n $serverIncludesVideo=" + ("$true" if included else "$false") + "\n" + body
     adapted = function
     # The selected test set replaces the old profile-bound test overlays.
-    if not preserve_legacy:
-        for pattern in (r"(?m)^\s*if\(\$profile.TEST_OVERLAY[^\n]+\n", r"(?m)^\s*if\(\$Variant -ceq 'browser'\)\{\$arguments[^\n]+\n"):
-            adapted, count = re.subn(pattern, "\n", adapted)
-            if count != 1:
-                raise ValueError("The test configuration adapter does not match the Distribution contract.")
+    for pattern in (r"(?m)^\s*if\(\$profile.TEST_OVERLAY[^\n]+\n", r"(?m)^\s*if\(\$Variant -ceq 'browser'\)\{\$arguments[^\n]+\n"):
+        adapted, count = re.subn(pattern, "\n", adapted)
+        if count != 1:
+            raise ValueError("The test configuration adapter does not match the Distribution contract.")
     if test_overlay is not None:
         anchor = "$arguments+=@('--optional-overlay',(Join-Path $Context.output 'Injection'))"
         if adapted.count(anchor) != 1:
@@ -190,6 +141,8 @@ def reusable(context, name, module, commit, toolset, dependencies):
             continue
         source_ids = module.get("source_ids", {})
         expected_dependencies = {source_ids.get(key, key): dependencies.get(source_ids.get(key, key)) for key in module.get("source_repositories", [])}
+        if not payload.get("sdk_profile") or payload["sdk_profile"] != module.get("sdk_profile") or payload.get("development_id"):
+            continue
         if payload.get("source_dependencies", {}) != expected_dependencies:
             continue
         for item in job["result"].get("files", []):
@@ -203,7 +156,7 @@ def reusable(context, name, module, commit, toolset, dependencies):
 
 def prepared_component(context, payload, name, module):
     """Reuse a checked component when a previous image/package phase failed."""
-    keys = ("release", "version", "sources", "components", "toolset")
+    keys = ("release", "version", "sources", "components", "toolset", "sdk_id", "sdk_profile")
     for previous in context.store.jobs("release:" + payload["release"]["id"], limit=40):
         if previous["id"] == context.job["id"] or previous["status"] not in ("failed", "interrupted"):
             continue
@@ -242,7 +195,11 @@ def build(context, payload):
     release, version = payload["release"], payload["version"]
     base = {"slim": "Slim", "full": "Full", "test": "Test"}[release["base"]]
     tools = under(store.root / "BuildTools/Toolsets", identifier(payload["toolset"]))
-    manifest = json.loads((tools / "toolset.json").read_text())
+    tools, manifest = toolsets.load(store,payload["toolset"])
+    package=sdk_packages.get(store,manifest["sdk_id"])
+    if payload.get("sdk_id")!=package["id"] or payload.get("sdk_profile")!=sdk_packages.provenance(package):
+        raise ValueError("This release job uses a removed SDK contract. Start a new release build.")
+    sdk_packages.verify(context,package["id"])
     if manifest.get("status") != "ready":
         raise ValueError("The selected toolset is not ready.")
     if shutil.disk_usage(store.root).free < 55 * 1024**3:
@@ -252,8 +209,12 @@ def build(context, payload):
     output = root / "Output"
     output.mkdir()
     (root / "Artifacts").symlink_to(output, target_is_directory=True)
-    (root / "Tools").unlink()
-    shutil.copytree(tools / "Repositories/Project/Tools", root / "Tools", ignore=shutil.ignore_patterns("Credentials"))
+    project_key=payload['main_sources'].get('r4os-project')
+    project_commit=payload['source_dependencies'].get(project_key)
+    if not project_key or not project_commit:raise ValueError('A clean pinned Project owner is required for image composition.')
+    project_root=root/'ProjectOwner'
+    clone_snapshot(context,catalog.repository_path(store,store.require_repository(project_key)),project_root,project_commit)
+    shutil.copytree(project_root/'Tools',root/'Tools',ignore=shutil.ignore_patterns('Credentials'))
     docs_key = payload.get("main_sources", {}).get("r4os-docs", "r4os-docs")
     docs_commit = payload.get("source_dependencies", {}).get(docs_key)
     if not docs_commit:
@@ -263,10 +224,15 @@ def build(context, payload):
     for name, commit in payload["sources"].items():
         try:
             repo = store.require_repository(name)
-            relative = builds.owner_relative(repo["display_name"])
+            module=next((m for m in payload["components"] if m["repository"]==name),None)
+            relative = builds.owner_relative(repo["display_name"],module,name if repo["connection_id"]!="main" else None)
         except ValueError:
             continue
         owner = root / "Repositories" / relative
+        if repo['display_name'] in ('r4os-sdk','r4os-contract','r4os-libraries','r4os-recovery'):
+            owners[name]=owner
+            if repo['connection_id']=='main':owners[repo['display_name']]=owner
+            continue
         if owner.is_symlink():
             owner.unlink()
         clone_snapshot(context, catalog.repository_path(store, repo), owner, commit)
@@ -275,31 +241,11 @@ def build(context, payload):
         owners[name] = owner
         if repo["connection_id"] == "main":
             owners[repo["display_name"]] = owner
-    # Build tools use their matched source versions even when a technical owner
-    # repository has moved ahead; both identities remain in the release receipt.
-    for central in ("SDK", "Contract"):
-        path = root / "Repositories" / central
-        if not path.exists():
-            path.symlink_to(tools / "Repositories" / central, target_is_directory=True)
     distribution = owners.get("r4os-distribution")
     kernel = owners.get("r4os-kernel")
     if not distribution or not kernel:
         raise ValueError("Kernel and Distribution must be selected as foundations.")
     boot, boot_record = boot_tools(context, tools)
-    (root / "DevKit").unlink()
-    (root / "DevKit/Boot").mkdir(parents=True)
-    for name in ("Setup", "Toolchains", "SDK", "HostTools", "Emulation"):
-        source = tools / "DevKit" / name
-        if source.exists():
-            (root / "DevKit" / name).symlink_to(source, target_is_directory=True)
-    (root / "DevKit/Boot/Limine").symlink_to(boot, target_is_directory=True)
-    for owner in owners.values():
-        settings = owner / "Settings.R4S"
-        if not settings.is_file():
-            continue
-        replacement = settings.read_text().replace("DEVKIT_ROOT=" + str(tools / "DevKit"), "DEVKIT_ROOT=" + str(root / "DevKit"))
-        if replacement != settings.read_text():
-            settings.write_text(replacement)
     for module in payload["components"]:
         builds.prepare_source_dependencies(context, root, owners[module["repository"]], module, tools, payload.get("source_dependencies", {}))
     if "r4os-libraries" in owners:
@@ -334,7 +280,8 @@ def build(context, payload):
                 (owner / "zig-out/bin").mkdir(parents=True, exist_ok=True)
                 shutil.copy2(local_path, owner / "zig-out/bin/r4os.elf")
         else:
-            paths, plan = builds.execute_target(context, root, owner, module, tools, module_output)
+            component_context=type(context)(store,dict(context.job,payload=dict(payload,sdk_profile=module['sdk_profile'],additional_libraries=[],development_id=None)))
+            paths, plan = builds.execute_target(component_context, root, owner, module, tools, module_output)
         if "manifest" in module:
             artifacts[str(owner / module["manifest"])] = str(paths[0])
         if module["id"] == "R4VIDEO":
@@ -344,26 +291,21 @@ def build(context, payload):
         component_receipts.append({"repository": name, "module": module["id"], "commit": payload["sources"][name],
                                    "files": [{"name": path.name, "sha256": digest(path)} for path in paths], "plan": plan})
     context.phase("Building Distribution host tools and resources")
-    zig = tools / "DevKit/Toolchains/Zig/zig"
+    zig = tools / "Install/Toolchains/Zig/zig"
     dist_prefix = output / "Distribution/HostTools"
-    context.run([zig, "build", "-j2", "-Doptimize=ReleaseSafe", "--prefix", dist_prefix,
-                 "--cache-dir", store.root / "BuildTools/Cache/Zig/Distribution",
-                 "--global-cache-dir", store.root / "BuildTools/Cache/Zig/Global",
-                 "--fork=" + str(root / "Repositories/SDK"), "--fork=" + str(root / "Repositories/Contract"),
-                 "--fork=" + str(root / "Repositories/Libraries")], cwd=distribution, timeout=3600)
+    context.run(['pwsh','-NoLogo','-NoProfile','-File',root/'Repositories/SDK/Tools/Sync-ComponentPins.ps1',
+                 '-SdkRoot',root/'Repositories/SDK','-ProjectRoot',distribution,'-IncludeLibraries','-Write'],timeout=120)
+    context.run(['pwsh','-NoLogo','-NoProfile','-File',root/'Repositories/SDK/Tools/BuildOwner.ps1',
+                 '-OwnerRoot',distribution,'-BuildArguments',"--prefix="+str(dist_prefix)],timeout=3600)
     catalog_exe, adapter = selection_catalog(context, tools, root, payload["components"])
     map_path = root / "ServerInputs/WorkspaceModules.map"
     map_path.parent.mkdir()
     map_path.write_text("\n".join(key + "|" + value for key, value in sorted(artifacts.items())) + "\n")
-    adapter["project_adapter_sha256"] = project_adapter(root, catalog_exe, map_path)
-    if "test_configuration" in payload:
-        frozen_tests = payload["test_configuration"]
-        context.phase("Test configuration: " + (frozen_tests["name"] + " · Revision " + str(frozen_tests["revision"]) if frozen_tests else "None"))
-        test_overlay = testconfigs.materialize(context, frozen_tests, root / "ServerTestOverlay")
-        adapter["distribution"] = distribution_adapter(root, payload["components"], test_overlay)
-    else:
-        # Older queued jobs keep their original profile-bound behavior.
-        adapter["distribution"] = distribution_adapter(root, payload["components"], preserve_legacy=True)
+    adapter["project_adapter_sha256"] = project_adapter(root, catalog_exe, map_path, adapter["selection"])
+    frozen_tests=payload['test_configuration']
+    context.phase('Test configuration: '+(frozen_tests['name'] if frozen_tests else 'None'))
+    test_overlay=testconfigs.materialize(context,frozen_tests,root/'ServerTestOverlay')
+    adapter['distribution']=distribution_adapter(root,payload['components'],test_overlay)
     prepare_video_sources(context, root, payload["components"])
     stage = store.root / "Release/.staging" / context.job["id"]
     stage.mkdir(parents=True)
@@ -372,7 +314,9 @@ def build(context, payload):
     source_record = {"schema": 1, "local": True, "release_version": version, "release_type": release,
                      "base_profile": base, "toolset": manifest, "sources": payload["sources"],
                      "components": component_receipts, "selection_adapter": adapter, "boot_tools": boot_record,
-                     "created": now(), "technical": True}
+                     "created": now(), "technical": False,
+                     "sdk_profile":dict(sdk_packages.provenance(package),profiles=package['manifest']['profiles'],
+                                        system_libraries=package['manifest']['system_libraries'])}
     if "test_configuration" in payload:
         source_record["test_configuration"] = payload["test_configuration"]
     source_record["source_dependencies"] = payload.get("source_dependencies", {})
@@ -419,4 +363,4 @@ def build(context, payload):
     final.parent.mkdir(parents=True, exist_ok=True)
     stage.rename(final)
     return {"release_type": release["id"], "version": version, "configuration_revision": release["revision"],
-            "output": str(final.relative_to(store.root)), "files": builds.register_outputs(store, final)}
+            "output": str(final.relative_to(store.root)), "sdk_profile":payload["sdk_profile"], "technical":False, "files": builds.register_outputs(store, final)}

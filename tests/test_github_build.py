@@ -78,9 +78,8 @@ class GitHubBuildTests(unittest.TestCase):
         self.local={'commit':self.commit,'branch':'main','dirty':False,'status':'current','modules':[self.module]}
         with self.store.connect() as db:
             db.execute('INSERT INTO repositories(name,github_id,metadata,local,directory) VALUES(?,?,?,?,?)',('unusual-project',5,json.dumps(meta),json.dumps(self.local),'Main/unusual-project'))
-        tools=self.store.root/'BuildTools/Toolsets/test-tools';tools.mkdir(parents=True)
-        (tools/'toolset.json').write_text(json.dumps({'id':'test-tools','status':'ready','versions':{},'sources':{}}))
-        self.store.set('active_toolset','test-tools')
+        from sdk_fixture import install
+        self.proof=install(self.store)
         self.fake=FakeGitHub(self.commit);self.build_count=0
         self.addCleanup(patch.stopall)
         patch.object(github_build,'Client',side_effect=self.fake.factory).start()
@@ -95,7 +94,7 @@ class GitHubBuildTests(unittest.TestCase):
         (folder/'files/GAME.R4X').write_bytes(b'compiled-target-'+payload['commit'].encode())
         (folder/'build.json').write_text(json.dumps({'commit':payload['commit'],'module':payload['module']}))
         return {'repository':name,'target':'GAME','commit':payload['commit'],'toolset':payload['toolset'],
-                'output':str(folder.relative_to(self.store.root)),'files':builds.register_outputs(self.store,folder)}
+                'sdk_profile':payload['sdk_profile'],'technical':False,'output':str(folder.relative_to(self.store.root)),'files':builds.register_outputs(self.store,folder)}
 
     def warm(self):
         self.store.enqueue('github_status','unusual-project')
@@ -217,6 +216,24 @@ class GitHubBuildTests(unittest.TestCase):
         local=dict(self.local,dirty=True);self.store.local('unusual-project',local)
         info=github_build.view(self.store,self.store.repository('unusual-project'),schedule=True)
         self.assertFalse(info['enabled']);self.assertIn('Local changes',info['reason'])
+
+    def test_old_receipt_and_changed_sdk_never_claim_published(self):
+        self.publish();release=self.fake.releases['v0.1.0']
+        asset=next(a for a in self.fake.assets(release) if a['name']=='r4os-build-GAME.json')
+        receipt=json.loads(self.fake.asset_bytes(asset));receipt['schema']=1
+        self.fake.data[asset['id']]=(asset,json.dumps(receipt).encode())
+        self.assertEqual(self.warm()['state'],'conflict')
+        receipt['schema']=2;receipt['sdk_profile']['profile_sources']['Build']='9'*64
+        self.fake.data[asset['id']]=(asset,json.dumps(receipt).encode())
+        self.assertEqual(self.warm()['state'],'conflict')
+        self.assertFalse(any(call[0]=='DELETE' for call in self.fake.calls))
+
+    def test_sdk_settings_invalidate_cache_and_technical_publish_is_rejected(self):
+        self.publish();from r4os_server.workspace import sdk_projects
+        with self.store.connect() as db:db.execute("INSERT INTO sdk_projects VALUES(?,?,?,?)",('unusual-project',None,'[]','explicit-technical'))
+        info=github_build.view(self.store,self.store.repository('unusual-project'))
+        self.assertFalse(info['enabled']);self.assertEqual(info['state'],'checking')
+        with self.assertRaisesRegex(Conflict,'Technical'):self.enqueue()
 
     def test_asset_transport_drops_auth_on_signed_redirect_and_uploads_binary(self):
         raw=b'artifact';requests=[]

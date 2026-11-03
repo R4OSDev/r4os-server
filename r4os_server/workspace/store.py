@@ -82,6 +82,10 @@ class Store:
             initialize_apps(db)
             from .github_build import initialize as initialize_github_builds
             initialize_github_builds(db)
+            from .sdk_packages import initialize as initialize_sdks
+            initialize_sdks(db)
+            from .sdk_projects import initialize as initialize_sdk_projects
+            initialize_sdk_projects(db)
             columns = {row["name"] for row in db.execute("PRAGMA table_info(release_types)")}
             migrate_tests = "test_configuration" not in columns
             if migrate_tests:

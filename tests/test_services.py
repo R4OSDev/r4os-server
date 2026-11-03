@@ -79,6 +79,20 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(self.request("PUT","/api/settings/rates",data={"benchmarks":75},token=self.config.admin_token)[0],200)
         self.assertEqual(self.registration.store.get_rate("benchmarks"),75)
 
+    def test_sdk_downloads_require_registration_and_preserve_original_bytes(self):
+        root=self.updates.sdk_storage/'SDK';payload=root/'Packages/sdk-readback/Payload';payload.mkdir(parents=True)
+        raw=b'original SDK asset';sha=hashlib.sha256(raw).hexdigest();(payload/'original.bin').write_bytes(raw)
+        (root/'catalog.json').write_text(json.dumps({'schema':1,'interface':'r4os-sdk-package','packages':[{'id':'sdk-readback','assets':[{'path':'original.bin','role':'tools','bytes':len(raw),'sha256':sha}]}]}))
+        self.assertEqual(self.request('GET','/sdk/catalog')[0],401);self.register()
+        status,catalog,_=self.request('GET','/sdk/catalog');self.assertEqual(status,200)
+        self.assertIn('/sdk/assets/sdk-readback/original.bin',catalog['packages'][0]['assets'][0]['download_url'])
+        status,body,headers=self.request('GET','/sdk/assets/sdk-readback/original.bin');self.assertEqual((status,body),(200,raw));self.assertEqual(headers['ETag'],'"'+sha+'"')
+        status,body,headers=self.request('GET','/sdk/assets/sdk-readback/original.bin',headers={'Range':'bytes=0-3'});self.assertEqual((status,body),(206,raw[:4]))
+        self.assertEqual(self.request('HEAD','/sdk/assets/sdk-readback/original.bin')[1],b'')
+        self.assertEqual(self.request('GET','/sdk/assets/sdk-readback/unknown.bin')[0],404)
+        (payload/'original.bin').write_bytes(b'X'*len(raw))
+        self.assertEqual(self.request('GET','/sdk/assets/sdk-readback/original.bin')[0],503)
+
     def test_invalid_magic_blocks_and_admin_can_unblock(self):
         with socket.create_connection(self.registration.server_address,timeout=5,source_address=("127.0.0.2",0)) as client:
             client.sendall(b"invalid\n")

@@ -62,45 +62,61 @@ def package_version(root):
 
 
 def validate(context, root, discovered):
-    toolset_key = context.store.setting("active_toolset")
-    if not toolset_key:
+    from . import toolsets, sdk_packages
+    try:
+        from . import builds
+        repo=next((repo for repo in context.store.repositories() if (context.store.root/'Repositories'/repo['directory']).resolve()==Path(root).resolve()),None)
+        if repo: _,tools,package,_=builds.selection(context.store,repo['name'])
+        else:
+            _,tools=toolsets.active(context.store);package=sdk_packages.get(context.store,tools['sdk_id'])
+        catalog = toolsets.prepare_metadata_parser(context,package['id'])
+    except ValueError:
+        for module in discovered['modules']:
+            module.update(validated=False, supported=False, reason='Select and set up a verified SDK, then refresh this repository.')
         return discovered
-    tool = under(context.store.root / "BuildTools/Metadata", identifier(toolset_key)) / "HostTools/bin/module-catalog"
-    if not tool.is_file():
-        return discovered
-    errors = list(discovered["profile"]["errors"])
-    for module in discovered["modules"]:
-        module["supported"] = module["language"] in ("Zig", "C", "Rust")
-        if not module["supported"]:
-            module["reason"] = "No build adapter is available for this project language."
-        if "manifest" not in module:
-            continue
+    errors = list(discovered['profile']['errors'])
+    for module in discovered['modules']:
         try:
-            metadata, _ = context.run([tool, "metadata", "--manifest", root / module["manifest"]], quiet=True, timeout=30)
-            entry = json.loads(metadata)
-            plan = entry.get("plan", {})
-            for key in ("kind", "name", "language", "target"):
-                if module[key] != entry[key]:
-                    raise ValueError("Manifest differs from the SDK plan: " + key)
-            module.update(scope=entry["image_scope"], build_profile=plan.get("build_profile", entry.get("build_mode", "explicit-project")),
-                          optimization=entry["optimization"], version=entry["module_version"], validated=True, validation_toolset=toolset_key)
-        except Cancelled:
-            raise
+            if module.get('manifest'):
+                text, _ = context.run([catalog, 'plan', '--manifest', Path(root)/module['manifest']], quiet=True, timeout=30)
+                plan = json.loads(text)['plan']
+                for key in ('kind','name','language'):
+                    if module[key] != plan[key]: raise ValueError('Manifest differs from the SDK plan: '+key)
+                profile = plan.get('rust_project', {}).get('profile')
+                if not profile:
+                    choices = [key for key,value in package['manifest']['profiles'].items()
+                               if value['role'] == 'module' and value['language'] == module['language']]
+                    if len(choices) != 1: raise ValueError('The SDK does not resolve this module to one profile.')
+                    profile = choices[0]
+                if profile not in package['manifest']['profiles']: raise ValueError('The catalog profile is not declared by this SDK.')
+                module.update(scope=plan.get('image_scope','none'), optimization=plan.get('optimization'),
+                              sdk_profile=sdk_packages.provenance(package,profile), supported=True, validated=True,
+                              validation_toolset=tools['id'], reason='')
+            else:
+                if module['id']=='distribution-tools' and 'Get-R4SdkBuildContext' not in (Path(root)/'Tools/Distribution.ps1').read_text(encoding='utf-8-sig'):
+                    raise ValueError('Update the Distribution source to an SDK-profile-aware revision before building.')
+                if module['id']=='kernel' and 'RustToolchain.json' in (Path(root)/'Build.ps1').read_text(encoding='utf-8-sig'):
+                    raise ValueError('Update the Kernel source to an SDK-profile-aware revision before building.')
+                role = 'native' if module['id'].startswith('native-') else 'kernel' if module['id'] == 'kernel' else 'recovery' if module['id'] == 'recovery' else 'host'
+                choices = [key for key,value in package['manifest']['profiles'].items() if value['role'] == role]
+                if len(choices) != 1: raise ValueError('The SDK has no unambiguous profile for this owner build.')
+                module.update(sdk_profile=sdk_packages.provenance(package,choices[0]),supported=True,validated=True,reason='')
+        except Cancelled: raise
         except (OSError, ValueError, RuntimeError, KeyError) as error:
-            module.update(supported=False, reason=str(error))
-            errors.append(module["id"] + ": " + str(error))
-    discovered["profile"].update(ready=bool(discovered["modules"]) and not errors, errors=errors)
-    if errors:
-        discovered["profile"]["reason"] = "; ".join(errors)
+            module.update(supported=False, validated=False, reason=str(error));errors.append(module['id']+': '+str(error))
+    discovered['profile'].update(ready=bool(discovered['modules']) and not errors, errors=errors)
+    if errors: discovered['profile']['reason']='; '.join(errors)
     return discovered
 
 
-def scan(root, name):
+def scan(root, name, *, archive=False):
     root = Path(root)
-    result = subprocess.run(["git", "-C", root, "ls-files", "-z", "--", "*.R4MF"],
-                            env=clean_env(), capture_output=True, check=True, timeout=15)
+    if archive: files=[p.relative_to(root).as_posix() for p in sorted(root.rglob('*.R4MF'))]
+    else:
+        result = subprocess.run(['git','-C',root,'ls-files','-z','--','*.R4MF'],env=clean_env(),capture_output=True,check=True,timeout=15)
+        files=result.stdout.decode('utf-8').split('\0')
     modules, errors = [], []
-    for relative in result.stdout.decode("utf-8").split("\0"):
+    for relative in files:
         if not relative or any(part in IGNORED for part in Path(relative).parts) or ("Fixtures" in Path(relative).parts and not relative.startswith("Fixtures/StandardChild/")):
             continue
         try:
@@ -132,6 +148,10 @@ def scan(root, name):
     }
     for key, label, kind, language in special.get(name, []):
         modules.append({"id": key, "name": label, "kind": kind, "language": language, "scope": "none", "validated": False})
+    if name=='r4os-libraries':
+        for script in sorted(root.glob('*/Tools/Build.ps1')):
+            unit=script.parent.parent.name
+            modules.append({'id':'native-'+unit.lower(),'name':unit+' native libraries','kind':'Native','language':'C++','scope':'none','validated':False})
     dependencies = []
     for path in [root / "build.zig.zon", *[root / Path(module["manifest"]).parent / "build.zig.zon" for module in modules if "manifest" in module]]:
         if path.exists():
