@@ -2,6 +2,7 @@
 from datetime import datetime
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -102,15 +103,35 @@ def snapshot(context, name, commit, destination):
         archive.unlink(missing_ok=True)
 
 
+def copy_sources(source,destination, *, ignore=()):
+    """Copy exact SDK bytes and executable bits without privileged filesystem flags.
+
+    Service RestrictSUIDSGID forbids applying inherited setgid directory modes.
+    SDK source identity covers file paths/bytes, not ACLs, xattrs or ownership.
+    """
+    source,destination=Path(source),Path(destination)
+    if destination.exists():raise ValueError('The SDK source destination already exists.')
+    for directory,folders,files in os.walk(source,followlinks=False):
+        relative=Path(directory).relative_to(source);target=destination/relative;target.mkdir(parents=True,exist_ok=True)
+        folders[:]=[name for name in folders if name not in ignore]
+        for name in folders:
+            if (Path(directory)/name).is_symlink():raise ValueError('SDK source symlinks are not supported.')
+        for name in files:
+            if name in ignore:continue
+            original=Path(directory)/name
+            if original.is_symlink() or not original.is_file():raise ValueError('SDK sources must be regular files.')
+            output=target/name;shutil.copyfile(original,output);output.chmod(original.stat().st_mode&0o777)
+
+
 def workspace(context,tools,key):
     root=context.store.root/'BuildTools/Workspaces'/identifier(key)
     if root.exists():raise ValueError('A build working directory with this ID already exists.')
     (root/'Repositories').mkdir(parents=True)
     manifest=sdk_packages.strict_json((tools/'toolset.json').read_bytes())
     paths=toolsets.package_paths(context.store,manifest)
-    shutil.copytree(paths['SDK'],root/'Repositories/SDK')
+    copy_sources(paths['SDK'],root/'Repositories/SDK')
     for name in ('Contract','Libraries'):
-        shutil.copytree(paths[name],root/'Repositories'/name)
+        copy_sources(paths[name],root/'Repositories'/name)
     (root/'Repositories/Recovery').symlink_to(paths['Recovery'],target_is_directory=True)
     (root/'Repositories/Tools').symlink_to(paths['HostTools'],target_is_directory=True)
     (root/'Install').symlink_to(tools/'Install',target_is_directory=True)

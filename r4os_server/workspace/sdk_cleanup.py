@@ -41,7 +41,7 @@ def inventory(store):
             if path.is_dir():paths.append(path);retired_repositories.append(repo['name'])
     # Cache/download directories from the removed installers have fixed roles.
     # SDK caches live under Cache/SDK and the installed environment is self-contained.
-    for name in ('Cache/Rust','Cache/Zig','Downloads'):
+    for name in (('Cache/Rust','Cache/Zig','Downloads') if obsolete_versions else ()):
         directory=root/name
         if directory.is_dir():paths.append(directory)
     return {'active':manifest['id'],'sdk_id':manifest['sdk_id'],'paths':[str(p.relative_to(store.root)) for p in paths],'obsolete_sdk_versions':sorted(obsolete_versions),'retired_repositories':retired_repositories}

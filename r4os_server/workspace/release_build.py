@@ -214,7 +214,7 @@ def build(context, payload):
     if not project_key or not project_commit:raise ValueError('A clean pinned Project owner is required for image composition.')
     project_root=root/'ProjectOwner'
     clone_snapshot(context,catalog.repository_path(store,store.require_repository(project_key)),project_root,project_commit)
-    shutil.copytree(project_root/'Tools',root/'Tools',ignore=shutil.ignore_patterns('Credentials'))
+    builds.copy_sources(project_root/'Tools',root/'Tools',ignore=('Credentials',))
     docs_key = payload.get("main_sources", {}).get("r4os-docs", "r4os-docs")
     docs_commit = payload.get("source_dependencies", {}).get(docs_key)
     if not docs_commit:

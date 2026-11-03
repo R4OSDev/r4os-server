@@ -30,7 +30,8 @@ def execute(context,root,owner,module,tools,output):
         # The normal recovery build consumes exactly the SDK-selected frozen tree.
         supplied=toolsets.package_paths(context.store,manifest)['Recovery']
         work=root/'RecoveryOwner'
-        shutil.copytree(supplied,work)
+        from .builds import copy_sources
+        copy_sources(supplied,work)
         context.run(['pwsh','-NoLogo','-NoProfile','-File',work/'Build.ps1','-Mode','Kernel','-SdkRoot',sdk,'-Zig',zig],cwd=work,timeout=3600)
         paths=[work/'Artifacts/Kernel/bin/recovery.elf']
         proof=work/'Artifacts/SDKProfile/profile.json'
