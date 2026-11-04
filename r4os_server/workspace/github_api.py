@@ -2,6 +2,7 @@
 import hashlib
 from http.client import HTTPSConnection
 import json
+import os
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -96,7 +97,7 @@ class Client:
             if len(items) < 100: return result
         raise GitHubFailure(502, 'Too many GitHub release assets.')
 
-    def _asset(self, asset, limit, digest):
+    def _asset(self, asset, limit, digest, *, destination=None, progress=None):
         url = 'https://api.github.com'+self.base+'/releases/assets/'+str(int(asset['id']))
         hashed, output, size = hashlib.sha256(), [], 0
         for redirect in range(4):
@@ -115,12 +116,21 @@ class Client:
                     url = response.getheader('Location', '')
                     continue
                 if response.status != 200: raise self.failure(response.status)
-                while chunk := response.read(65536):
-                    self.check()
-                    size += len(chunk)
-                    if size > limit: raise GitHubFailure(502, 'GitHub asset exceeds the expected size.')
-                    if digest: hashed.update(chunk)
-                    else: output.append(chunk)
+                stream = destination.open('xb') if destination is not None else None
+                try:
+                    while chunk := response.read(65536):
+                        self.check()
+                        size += len(chunk)
+                        if size > limit: raise GitHubFailure(502, 'GitHub asset exceeds the expected size.')
+                        if digest: hashed.update(chunk)
+                        elif stream is None: output.append(chunk)
+                        if stream is not None: stream.write(chunk)
+                        if progress: progress(size)
+                    if stream is not None:
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                finally:
+                    if stream is not None: stream.close()
                 if size != int(asset['size']): raise GitHubFailure(502, 'The GitHub asset is incomplete.')
                 return hashed.hexdigest() if digest else b''.join(output)
             except OSError:
@@ -130,6 +140,12 @@ class Client:
 
     def asset_bytes(self, asset, limit=131072):
         return self._asset(asset, limit, False)
+
+    def download(self, asset, destination, expected, progress=None):
+        actual = self._asset(asset, int(asset['size']), True, destination=Path(destination), progress=progress)
+        if actual != expected:
+            raise GitHubFailure(502, 'The downloaded app asset differs from its SHA-256 checksum.')
+        return actual
 
     def asset_digest(self, asset):
         digest = asset.get('digest') or ''

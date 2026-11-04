@@ -228,7 +228,9 @@ def refresh_repository(context, name, expected):
         raise RuntimeError('Repository source status could not be refreshed: '+local['detail'])
     from .github_build import refresh as refresh_release
     release = refresh_release(context, name, raise_network_errors=True)
-    return {'repository':name, 'local':local, 'github_release_status':release}
+    from .app_releases import refresh as refresh_app_release
+    app_release = refresh_app_release(context, store.require_repository(name))
+    return {'repository':name, 'local':local, 'github_release_status':release, 'app_release':app_release}
 
 
 def refresh_repository_metadata(context, repo, connection):

@@ -11,7 +11,8 @@ from urllib.parse import urlsplit
 ACTIVE = ("queued", "running")
 SDK_MUTATIONS = ('sdk_select', 'sdk_import', 'sdk_cleanup', 'tools_install', 'tools_update', 'tools_activate')
 FOLDERS = ("Repositories", "BuildTools", "Artifacts", "Release", "Apps")
-REPOSITORY_ACTIONS = ('refresh','refresh_all','catalog','check','download','update','download_all','update_all','build','build_publish','app_publish','connection_delete')
+REPOSITORY_ACTIONS = ('refresh','refresh_all','catalog','check','download','update','download_all','update_all','build','build_publish','app_publish','connection_delete',
+                      'app_refresh','app_download','app_update','app_remove_local')
 REPOSITORY_FIELDS = ("r.*,c.status AS connection_status,c.revision AS connection_revision,c.has_token AS connection_has_token,c.catalog AS connection_catalog,"
                      "COALESCE((SELECT published FROM apps WHERE repository_name=r.name),0) AS app_published,"
                      "EXISTS(SELECT 1 FROM jobs WHERE kind='app_publish' AND subject=r.name AND status IN ('queued','running') AND cancel=0) AS app_publishing,"
@@ -245,7 +246,7 @@ class Store:
         batch_child=bool(parent and source and any(item['id']==source['connection_id'] and item['revision']==payload.get('connection_revision') for item in json.loads(parent['payload']).get('connections',[])))
         if source:
             metadata = json.loads(source['metadata'])
-            if metadata.get("private") and not batch_child:
+            if metadata.get("private") and not batch_child and kind != 'app_remove_local':
                 self.require_repository(subject)
             payload = dict(payload, repository_label=(metadata.get("owner", "") + "/" if metadata.get("owner") else "") + metadata.get("display_name", subject))
         if kind == 'refresh':

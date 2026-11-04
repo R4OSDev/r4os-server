@@ -102,12 +102,16 @@ def existing(store, name):
 
 def record(store, row, repo=None):
     repo = repo or store.repository(row['repository_name'])
+    from .app_releases import view as release_view
+    release = release_view(store, repo)
+    release_version = (release['local'] or release['available'] or {}).get('version')
     default_path = 'C:\\Software\\'+row['manifest_name']
     return {'repository': row['repository_name'], 'repository_name': repo['display_name'], 'owner': repo['owner'],
             'connection_id': repo['connection_id'], 'repository_available': repo['available'],
             'repository_error': repo['unavailable_reason'], 'refresh_job': repo['refresh_job'],
             'private': repo['private'], 'published': bool(row['published']),
-            'manifest_name': row['manifest_name'], 'version': row['manifest_version'],
+            'manifest_name': row['manifest_name'], 'source_version': row['manifest_version'],
+            'version': release_version, 'release': release,
             'default_display_name': row['manifest_name'], 'display_name_override': row['display_name_override'],
             'display_name': row['display_name_override'] or row['manifest_name'],
             'default_install_path': default_path, 'install_path_override': row['install_path_override'],
@@ -248,6 +252,17 @@ def dispatch(handler):
             with store.connect() as db:
                 pending = db.execute("SELECT count(*) FROM jobs WHERE kind='app_publish' AND status IN ('queued','running') AND cancel=0").fetchone()[0]
             return handler.json(200, {'apps': overview(store), 'publishing': pending, 'active_jobs':store.active_jobs()})
+        if parts[:1] == ['actions'] and len(parts) == 2 and handler.command == 'POST':
+            from .app_releases import request, batch
+            value = json.loads(handler.body())
+            action = parts[1]
+            if action.endswith('_all'):
+                if value != {}:
+                    raise ValueError('Bulk app actions require an empty JSON object.')
+                return handler.json(202, batch(store, action.removesuffix('_all')))
+            if not isinstance(value, dict) or set(value) != {'name'}:
+                raise ValueError('Provide the selected app name.')
+            return handler.json(202, request(store, value['name'], action))
         if len(parts) == 2 and parts[0] == 'items':
             if handler.command in ('GET', 'HEAD'):
                 return handler.json(200, get(store, parts[1]))

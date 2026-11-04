@@ -10,16 +10,17 @@ KINDS = {'refresh':'Repository refresh', 'catalog':'Catalogue refresh', 'refresh
          'download':'Download repository', 'update':'Update repository', 'download_all':'Download repositories',
          'update_all':'Update repositories', 'check':'Check repository', 'github_status':'Artifact check',
          'build':'Build', 'build_publish':'Build and publish', 'release':'Build release',
-         'app_publish':'Show in Apps', 'connection_delete':'Remove connection'}
+         'app_publish':'Show in Apps', 'connection_delete':'Remove connection',
+         'app_refresh':'App refresh','app_download':'Download app','app_update':'Update app','app_remove_local':'Remove local app files'}
 
 
 def workspace_job(job):
     kind, payload = job['kind'], job['payload']
-    area = ('SDK / Tools' if kind.startswith(('sdk_','tools_')) else 'Apps' if kind == 'app_publish'
+    area = ('SDK / Tools' if kind.startswith(('sdk_','tools_')) else 'Apps' if kind.startswith('app_')
             else 'Builds' if kind in ('build','build_publish','release') else 'Repositories')
     title = KINDS.get(kind, kind.replace('_',' ').capitalize())
     release=payload.get('release')
-    target = payload.get('repository_label') or (release.get('name') if isinstance(release,dict) else '') or job['subject']
+    target = payload.get('app_label') or payload.get('repository_label') or (release.get('name') if isinstance(release,dict) else '') or job['subject']
     return {'key':'workspace:'+job['id'], 'id':job['id'], 'source':'workspace', 'area':area,
             'title':title, 'target':scrub(target or ''), 'status':job['status'],
             'phase':'Cancellation requested' if job['cancel'] else scrub(job['phase']),

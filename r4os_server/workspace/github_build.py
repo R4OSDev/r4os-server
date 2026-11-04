@@ -64,7 +64,7 @@ def marker(release):
     except (ValueError, IndexError): return {}
 
 
-def verify_receipt(client, repo, module, commit, release, contract=None):
+def verify_receipt(client, repo, module, commit, release, contract=None, *, asset_hashes=True):
     assets = client.assets(release)
     names = [asset['name'] for asset in assets]
     if len(names) != len(set(names)):
@@ -96,7 +96,8 @@ def verify_receipt(client, repo, module, commit, release, contract=None):
             raise Conflict('Invalid release artifact contract.')
         required.add(name)
         found = by_name.get(name)
-        if not found or found.get('state') != 'uploaded' or int(found['size']) != size or client.asset_digest(found) != digest:
+        check_hash = asset_hashes or bool(re.fullmatch(r'sha256:[0-9a-f]{64}', (found or {}).get('digest') or ''))
+        if not found or found.get('state') != 'uploaded' or int(found['size']) != size or check_hash and client.asset_digest(found) != digest:
             raise Conflict('Release assets are missing or differ from their build receipt.')
     if module['kind'] in ('R4X', 'R4L', 'R4D', 'R4P') and module['id']+'.'+module['kind'] not in required:
         raise Conflict('The selected target artifact is missing from this release.')

@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from http.client import HTTPConnection
 import json
+import hashlib
 import os
 from pathlib import Path
 import tempfile
@@ -12,7 +13,9 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from r4os_server.workspace import apps, catalog, connections, layout, worker
+from r4os_server.workspace import apps, catalog, connections, layout, worker, app_releases, app_storage
+from r4os_server.workspace.github_api import GitHubFailure
+from r4os_server.workspace.process import Context
 from r4os_server.workspace.store import Store, Conflict
 from test_benchmarks import configuration
 from WebApp.server import create_server
@@ -21,7 +24,87 @@ from WebApp.server import create_server
 MANIFEST = 'R4OS_MODULE_MANIFEST=2\nKIND=R4X\nNAME=MINESWEEPER_665F9DD0\nVERSION=0.1.0\nLANGUAGE=Rust\n'
 
 
+class AppGitHub:
+    """Published release fixture; writes or source requests fail the test."""
+    target = 'MINESWEEPER_665F9DD0'
+
+    def __init__(self, repository_id=1):
+        self.repository_id = repository_id
+        self.credentials, self.reads, self.downloads = [], [], []
+        self.check = lambda: None
+        self.during_download = lambda: None
+        self.set_release('0.1.0', 11)
+
+    def factory(self, repo, token, check=lambda: None):
+        self.credentials.append((repo['id'], token));self.check = check
+        return self
+
+    def set_release(self, version, number):
+        self.release = {'id': number, 'tag_name': 'v'+version, 'draft': False, 'prerelease': False,
+                        'published_at': '2026-11-04T10:00:00Z'}
+        self.commit = hashlib.sha1(version.encode()).hexdigest()
+        binary = b'downloaded-from-github-'+version.encode()
+        checksum = (hashlib.sha256(binary).hexdigest()+'  '+self.target+'.R4X\n').encode()
+        self.data, self.items = {}, []
+        files = []
+        for name, raw in ((self.target+'.R4X', binary), (self.target+'.sha256', checksum)):
+            self.add(name, raw, number)
+            files.append({'name': name, 'size': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()})
+        receipt = {'schema': 2, 'repository_id': self.repository_id, 'target': self.target,
+                   'version': version, 'commit': self.commit, 'technical': False,
+                   'sdk_profile': {'sdk_id': 'fixture-sdk', 'profile_sources': {'Build': 'a'*64}}, 'assets': files}
+        self.add('r4os-build-'+self.target+'.json', json.dumps(receipt).encode(), number)
+
+    def add(self, name, raw, number):
+        key = number*100+len(self.items);self.data[key] = raw
+        self.items.append({'id': key, 'name': name, 'size': len(raw), 'state': 'uploaded',
+                           'digest': 'sha256:'+hashlib.sha256(raw).hexdigest(), 'updated_at': '2026-11-04T10:00:00Z'})
+
+    def request(self, method, path, *args, **kwargs):
+        self.check();assert method == 'GET', 'App downloads must never mutate GitHub'
+        if path == '':return {'id': self.repository_id}
+        if path == '/releases/latest':return self.release
+        raise AssertionError('Unexpected app request '+path)
+
+    def assets(self, release):self.check();return self.items
+    def tag_commit(self, tag):self.check();return self.commit
+    def asset_bytes(self, item, limit=131072):
+        self.check();self.reads.append(item['name']);return self.data[item['id']]
+    def asset_digest(self, item):return item['digest'][7:] if item.get('digest') else hashlib.sha256(self.data[item['id']]).hexdigest()
+    def download(self, item, destination, expected, progress=None):
+        self.check();self.downloads.append(item['name']);raw = self.data[item['id']]
+        destination.write_bytes(raw)
+        if hashlib.sha256(raw).hexdigest() != expected:raise GitHubFailure(502, 'Checksum mismatch')
+        if progress:progress(len(raw))
+        self.during_download();self.check()
+
+
 class AppTests(unittest.TestCase):
+    def remote_app(self):
+        apps.publish(self.store, 'minesweeper', {'published': True})
+        fake = AppGitHub()
+        patcher = patch.object(app_releases, 'Client', side_effect=fake.factory)
+        patcher.start();self.addCleanup(patcher.stop)
+        self.refresh_release()
+        return fake
+
+    def refresh_release(self):
+        job = app_releases.request(self.store, 'minesweeper', 'refresh')
+        self.store.change_job(job['id'], status='running')
+        context = Context(self.store, self.store.job(job['id']))
+        try:
+            selected = app_releases.refresh(context, self.store.repository('minesweeper'))
+            self.store.change_job(job['id'], status='completed')
+            return selected
+        except Exception:
+            self.store.change_job(job['id'], status='failed')
+            raise
+
+    def download_release(self, action='download'):
+        job = app_releases.request(self.store, 'minesweeper', action)
+        self.assertTrue(worker.once(self.store))
+        return self.store.job(job['id'])
+
     def staged_release(self, name='minesweeper', release_id=11, content=b'github-release'):
         import hashlib
         from r4os_server.workspace import app_storage
@@ -232,6 +315,15 @@ class AppTests(unittest.TestCase):
             self.assertEqual(failed['apps'][0]['refresh_job']['error'], 'Fixture refresh failed')
             self.assertEqual(failed['apps'][0]['display_name'], 'Minesweeper')
             self.assertEqual(failed['apps'][0]['description'], '<b>Literal text</b>')
+            self.assertEqual(request('/api/apps/actions/refresh', 'POST', {'name':'minesweeper'})[0], 403)
+            self.assertEqual(request('/api/apps/actions/download_all', 'POST', {'name':'minesweeper'}, headers)[0], 422)
+            self.assertEqual(request('/api/apps/actions/download', 'POST', {'name':'minesweeper'}, headers)[0], 409)
+            status, app_job = request('/api/apps/actions/refresh', 'POST', {'name':'minesweeper'}, headers)
+            self.assertEqual(status, 202);self.assertEqual(app_job['kind'], 'app_refresh')
+            overview = request('/api/apps/overview')[1]
+            self.assertEqual(overview['apps'][0]['release']['job']['id'], app_job['id'])
+            self.assertIsNone(overview['apps'][0]['version'])
+            self.assertEqual(overview['apps'][0]['source_version'], '0.1.0')
         finally:
             server.shutdown();server.server_close();thread.join(timeout=5)
 
@@ -286,3 +378,108 @@ class AppTests(unittest.TestCase):
         removal = SimpleNamespace(store=self.store, job={'id': 'delete', 'subject': conn['id']}, phase=lambda *_: None)
         connections.remove(removal)
         self.assertFalse(app_storage.path(self.store, 'Apps/1/Releases/11').exists())
+
+    def test_github_app_download_uses_published_release_without_checkout_or_build_files(self):
+        fake = self.remote_app()
+        self.assertTrue(all(name.endswith('.json') for name in fake.reads))
+        self.assertEqual(fake.downloads, [])
+        apps.save(self.store, 'minesweeper', self.settings(display_name='Friendly', description='Preserve this'))
+        source = layout.repository_path(self.store, self.store.repository('minesweeper'))
+        import shutil
+        shutil.rmtree(source)
+        job = self.download_release()
+        self.assertEqual(job['status'], 'completed', job['error'])
+        self.assertEqual(len(fake.downloads), 3)
+        value = apps.get(self.store, 'minesweeper')
+        self.assertEqual((value['version'], value['release']['state'], value['display_name'], value['description']),
+                         ('0.1.0', 'current', 'Friendly', 'Preserve this'))
+        self.assertTrue(app_storage.current(self.store, 'minesweeper', hashes=True)['valid'])
+        self.assertFalse((self.store.root/'Artifacts').exists())
+        self.assertTrue(all(token == '' for _, token in fake.credentials))
+        self.assertFalse(value['release']['can_download']);self.assertFalse(value['release']['can_update'])
+
+    def test_app_update_keeps_previous_release_and_only_updates_newer_available_versions(self):
+        fake = self.remote_app();self.assertEqual(self.download_release()['status'], 'completed')
+        fake.set_release('0.2.0', 12);self.refresh_release()
+        self.assertTrue(apps.get(self.store, 'minesweeper')['release']['can_update'])
+        job = self.download_release('update');self.assertEqual(job['status'], 'completed', job['error'])
+        state = apps.get(self.store, 'minesweeper')['release']
+        self.assertEqual((state['local']['release_id'], state['local_release_count']), (12, 2))
+        self.assertTrue(app_storage.path(self.store, 'Apps/1/Releases/11').exists())
+        fake.set_release('0.1.0', 11);self.refresh_release()
+        state = apps.get(self.store, 'minesweeper')['release']
+        self.assertEqual(state['state'], 'local_newer');self.assertFalse(state['can_update'])
+        with self.assertRaises(Conflict):app_releases.request(self.store, 'minesweeper', 'update')
+
+    def test_corrupt_or_changing_github_download_preserves_current_app(self):
+        fake = self.remote_app();self.download_release()
+        fake.set_release('0.2.0', 12);self.refresh_release()
+        binary = next(item for item in fake.items if item['name'].endswith('.R4X'))
+        fake.data[binary['id']] = b'bad-checksum'
+        failed = self.download_release('update')
+        self.assertEqual(failed['status'], 'failed')
+        self.assertIn('Checksum mismatch', failed['error'])
+        self.assertEqual(app_storage.current(self.store, 'minesweeper')['release_id'], 11)
+        self.assertFalse(app_storage.path(self.store, 'Apps/1/Releases/12').exists())
+        fake.set_release('0.2.0', 12);self.refresh_release()
+        def changed():
+            if len(fake.downloads) == 7:
+                fake.during_download = lambda: None
+                fake.set_release('0.3.0', 13)
+        fake.during_download = changed
+        failed = self.download_release('update')
+        self.assertEqual(failed['status'], 'failed')
+        self.assertIn('changed during download', failed['error'])
+        self.assertEqual(app_storage.current(self.store, 'minesweeper')['release_id'], 11)
+
+    def test_app_refresh_rejects_missing_receipts_drafts_and_ambiguous_assets_honestly(self):
+        fake = self.remote_app()
+        for change in ('receipt', 'draft', 'duplicate', 'tag'):
+            fake.set_release('0.1.0', 11)
+            if change == 'receipt':fake.items = [a for a in fake.items if not a['name'].endswith('.json')]
+            elif change == 'draft':fake.release['draft'] = True
+            elif change == 'duplicate':fake.items.append(dict(fake.items[0], id=9999))
+            else:fake.release['tag_name'] = 'v9.9.9'
+            with self.subTest(change=change), self.assertRaises((ValueError, Conflict)):
+                self.refresh_release()
+            state = apps.get(self.store, 'minesweeper')['release']
+            self.assertEqual(state['remote_status'], 'unknown');self.assertFalse(state['can_download'])
+        fake.release = None;self.refresh_release()
+        self.assertEqual(apps.get(self.store, 'minesweeper')['release']['remote_status'], 'missing')
+
+    def test_app_jobs_deduplicate_bind_revision_and_remove_without_token(self):
+        fake = self.remote_app()
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            jobs = list(pool.map(lambda _: app_releases.request(self.store, 'minesweeper', 'download'), range(4)))
+        self.assertEqual(len({job['id'] for job in jobs}), 1)
+        self.store.cancel_job(jobs[0]['id'])
+        self.assertIsNone(app_storage.current(self.store, 'minesweeper'))
+        self.assertEqual(self.download_release()['status'], 'completed')
+        fake.set_release('0.2.0', 12);self.refresh_release()
+        update = app_releases.request(self.store, 'minesweeper', 'update')
+        with self.store.connect() as db:db.execute("UPDATE connections SET revision=revision+1 WHERE id='main'")
+        worker.once(self.store)
+        self.assertEqual(self.store.job(update['id'])['status'], 'failed')
+        self.assertEqual(app_storage.current(self.store, 'minesweeper')['release_id'], 11)
+        removal = app_releases.request(self.store, 'minesweeper', 'remove_local');worker.once(self.store)
+        self.assertEqual(self.store.job(removal['id'])['status'], 'completed')
+        self.assertIsNone(app_storage.current(self.store, 'minesweeper'))
+        self.assertTrue(apps.get(self.store, 'minesweeper')['published'])
+
+    def test_private_app_release_uses_its_connection_token_and_cancels_during_download(self):
+        conn = connections.save(self.store, {'url': 'https://github.com/R4mboX', 'token': 'fake-app-read-token'})
+        self.seed('private-game', 2, conn['id'], private=True)
+        apps.publish(self.store, 'private-game', {'published': True})
+        fake = AppGitHub(2)
+        with patch.object(app_releases, 'Client', side_effect=fake.factory):
+            refresh = app_releases.request(self.store, 'private-game', 'refresh')
+            self.store.change_job(refresh['id'], status='running')
+            app_releases.refresh(Context(self.store, self.store.job(refresh['id'])), self.store.repository('private-game'))
+            self.store.change_job(refresh['id'], status='completed')
+            job = app_releases.request(self.store, 'private-game', 'download')
+            fake.during_download = lambda: self.store.cancel_job(job['id'])
+            worker.once(self.store)
+        self.assertEqual(self.store.job(job['id'])['status'], 'cancelled')
+        self.assertTrue(all(token == 'fake-app-read-token' for _, token in fake.credentials))
+        self.assertIsNone(app_storage.current(self.store, 'private-game'))
+        self.assertFalse(app_storage.path(self.store, 'Apps/.staging/'+job['id']).exists())

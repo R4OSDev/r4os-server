@@ -381,7 +381,8 @@ class GitHubBuildTests(unittest.TestCase):
             def __init__(self,status,data=b'',headers=None):self.status=status;self.body=io.BytesIO(data);self.headers=headers or {}
             def read(self,size=-1):return self.body.read(size)
             def getheader(self,key,default=None):return self.headers.get(key,default)
-        responses=[Response(302,headers={'Location':'https://release-assets.githubusercontent.com/object?signature=signed'}),Response(200,raw),Response(201,b'{"id":1}')]
+        responses=[Response(302,headers={'Location':'https://release-assets.githubusercontent.com/object?signature=signed'}),Response(200,raw),Response(201,b'{"id":1}'),
+                   Response(302,headers={'Location':'https://release-assets.githubusercontent.com/object?signature=signed'}),Response(200,raw),Response(200,b'corrupt!')]
         class Connection:
             def __init__(self,host,**kwargs):self.host=host
             def request(self,method,path,body=None,headers=None):
@@ -398,6 +399,11 @@ class GitHubBuildTests(unittest.TestCase):
         with patch('r4os_server.workspace.github_api.HTTPSConnection',Connection):
             self.assertEqual(client.asset_bytes(asset),raw)
             client.upload({'id':2},'artifact.R4X',path)
+            downloaded=self.root/'downloaded.R4X';progress=[]
+            client.download(asset,downloaded,hashlib.sha256(raw).hexdigest(),progress.append)
+            self.assertEqual(downloaded.read_bytes(),raw);self.assertEqual(progress[-1],len(raw))
+            with self.assertRaises(GitHubFailure):client.download(asset,self.root/'bad.R4X',hashlib.sha256(raw).hexdigest())
         self.assertIn('Authorization',requests[0][4]);self.assertNotIn('Authorization',requests[1][4])
         self.assertEqual(requests[2][0],'uploads.github.com');self.assertEqual(requests[2][3],raw)
         self.assertEqual(requests[2][4]['Content-Length'],str(len(raw)))
+        self.assertIn('Authorization',requests[3][4]);self.assertNotIn('Authorization',requests[4][4])

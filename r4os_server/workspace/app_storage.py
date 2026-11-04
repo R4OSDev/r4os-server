@@ -99,11 +99,18 @@ def current(store, name, *, hashes=False):
     if row is None:
         return None
     value = json.loads(row['metadata'])
-    value.update(directory=row['directory'], downloaded_at=row['downloaded_at'], verified_at=row['verified_at'], valid=True, error='')
+    value.update(directory=row['directory'], downloaded_at=row['downloaded_at'], verified_at=row['verified_at'],
+                 valid=bool(row['verified_at']), error='')
     try:
         verify(path(store, row['directory']), value, hashes=hashes)
     except (OSError, ValueError):
-        value.update(valid=False, error='Local app files are missing or damaged. Remove the local files and download again.')
+        value['valid'] = False
+    if not value['valid']:
+        value['error'] = 'Local app files are missing or damaged. Remove the local files and download again.'
+    if hashes:
+        with store.connect() as db:
+            db.execute('UPDATE app_releases SET verified_at=? WHERE repository_id=? AND release_id=?',
+                       (now() if value['valid'] else '', row['repository_id'], row['release_id']))
     return value
 
 
@@ -135,7 +142,8 @@ def install(context, repo, revision, selection, staged):
         bind(db, repo, revision, context.job['id'])
         old = db.execute('SELECT metadata FROM app_releases WHERE repository_id=? AND release_id=?',
                          (repo['id'], selection['release_id'])).fetchone()
-        if old and json.loads(old['metadata']) != selection:
+        immutable = lambda value: {key:value for key,value in value.items() if key not in ('url','published_at')}
+        if old and immutable(json.loads(old['metadata'])) != immutable(selection):
             raise Conflict('This release ID already has different local assets. Remove the local files before retrying.')
         if destination.exists():
             verify(destination, selection)

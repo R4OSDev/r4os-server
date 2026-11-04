@@ -45,6 +45,9 @@ def execute(context):
         from .apps import publish
         context.phase("Reading the app listing manifest")
         return publish(context.store, subject, {"published": True}, job_id=job['id'], expected_revision=payload['connection_revision'])
+    if kind in ('app_refresh','app_download','app_update','app_remove_local'):
+        from .app_releases import run
+        return run(context)
     if kind == "github_status":
         from .github_build import refresh
         return refresh(context, subject)
