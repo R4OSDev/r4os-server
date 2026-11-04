@@ -78,7 +78,7 @@ window.R4 = (() => {
     if(job.kind==='update_all'&&Array.isArray(job.payload?.targets))return job.payload.targets.some(target=>target.name===repo.name);
     return ['catalog','check','download_all','update_all'].includes(job.kind)&&!job.subject&&(!job.payload?.connection_id||job.payload.connection_id===repo.connection_id);
   };
-  ui.repositoryActions=['refresh','refresh_all','catalog','check','download','update','download_all','update_all','build','build_publish','app_publish','connection_delete'];
+  ui.repositoryActions=['refresh','refresh_all','catalog','check','download','update','download_all','update_all','build','build_publish','app_publish','connection_delete','app_refresh','app_download','app_update','app_remove_local'];
   ui.entryRefresh = (() => {
     const requests=new Map(),errors=new Map(),watched=new Map(),updated=new Map();
     const notify=(name,phase,job=null)=>window.dispatchEvent(new CustomEvent('entry-refresh',{detail:{name,phase,job}}));

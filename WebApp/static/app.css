@@ -77,6 +77,13 @@ a:focus-visible {
 .repository-publish input { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); }
 .app-description { margin: 8px 0; color: var(--muted); white-space: pre-wrap; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .app-install-path { display: block; font-family: ui-monospace,SFMono-Regular,Consolas,monospace; font-size: 11px; }
+.app-release-status { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.app-release-badge[data-release-state="current"] { color: #b2dbc0; background: #243b2d; }
+.app-release-badge:is([data-release-state="outdated"],[data-release-state="damaged"],[data-release-state="conflict"]) { color: #e2c185; background: #3d3220; }
+.app-progress { display: block; width: 100%; max-width: 260px; margin-top: 12px; height: 6px; accent-color: var(--accent); }
+.action-help { display: inline-flex; max-width: 100%; }
+.action-help .button:disabled { pointer-events: none; }
+.action-help:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 6px; }
 @media(max-width:1100px) {
   .repository-filters { grid-template-columns: repeat(2,minmax(0,1fr)); }
   .repository-filters .repo-search { grid-column: 1/-1; }
