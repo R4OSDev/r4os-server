@@ -7,18 +7,15 @@
   let sdkChoice=sdkStored('sdk-release'),sdkCustom=sdkStored('sdk-custom'),sdkData=null,sdkError='',sdkSending=false,sdkRequest=0;
   let sdkTools=null,sdkDetailsOpen=sdkStored('sdk-details-open')==='1';
   const sdkToolDrafts=new Map();
-  const repositoryRefreshErrors=new Map();
-  const repositoryRefreshPending=new Set();
+  let overviewRequest=0,overviewGeneration=0;
   const active=job=>['queued','running'].includes(job.status);
   const status=value=>'<span class="badge">'+E(states[value]||value||'Unknown')+'</span>';
-  const button=(label,action,name='',disabled=false,primary=false,title='',ariaLabel='',loading=false)=>'<button type="button" class="button '+(primary?'primary':'subtle')+(loading?' is-loading':'')+'" data-repo-action="'+E(action)+'" data-name="'+E(name)+'"'+(disabled?' disabled':'')+(title?' title="'+E(title)+'"':'')+(ariaLabel?' aria-label="'+E(ariaLabel)+'"':'')+(loading?' aria-busy="true"':'')+'>'+(['catalog','sdk_refresh','refresh'].includes(action)?U.refreshIcon:'')+E(label)+'</button>';
-  function affectsRepository(job,repo){
-    if(job.subject===repo.name)return true;
-    if(job.kind==='connection_delete')return job.subject===repo.connection_id;
-    if(job.kind==='update_all'&&Array.isArray(job.payload?.targets))return job.payload.targets.some(target=>target.name===repo.name);
-    return ['catalog','check','download_all','update_all'].includes(job.kind)&&!job.subject&&(!job.payload?.connection_id||job.payload.connection_id===repo.connection_id);
-  }
+  const button=(label,action,name='',disabled=false,primary=false,title='',ariaLabel='',loading=false)=>'<button type="button" class="button '+(primary?'primary':'subtle')+(loading?' is-loading':'')+(action==='refresh'&&label==='Updated'?' is-updated':'')+'" data-repo-action="'+E(action)+'" data-name="'+E(name)+'"'+(disabled?' disabled':'')+(title?' title="'+E(title)+'"':'')+(ariaLabel?' aria-label="'+E(ariaLabel)+'"':'')+(loading?' aria-busy="true"':'')+'>'+(['catalog','sdk_refresh','refresh'].includes(action)?action==='refresh'&&label==='Updated'?U.updatedIcon:U.refreshIcon:'')+E(label)+'</button>';
+  const affectsRepository=U.affectsRepository;
+  const repositorySearch=repo=>((repo.display_name||repo.name)+' '+(repo.owner||'')+' '+repo.description).toLowerCase();
+  const repositoryMatches=repo=>repositorySearch(repo).includes(filter.toLowerCase())&&(!category||(repo.server_metadata?.category||'Undefined')===category)&&(!account||(repo.owner||'').toLowerCase()===account);
   async function refreshPage(ctx){
+    if(ctx.view==='repositories'&&ctx.sub==='overview')return loadOverview(ctx,true);
     const focused=document.activeElement,scroll=U.scrollContainer().scrollTop;
     let selector=focused?.id?'#'+CSS.escape(focused.id):focused?.dataset.repoAction?'[data-repo-action="'+CSS.escape(focused.dataset.repoAction)+'"][data-name="'+CSS.escape(focused.dataset.name||'')+'"]':null;
     if(!selector&&focused?.closest('form')?.id&&focused.type==='submit')selector='#'+CSS.escape(focused.closest('form').id)+' [type="submit"]';
@@ -31,10 +28,11 @@
     U.scrollContainer().scrollTop=scroll;
   }
   function pollOverview(ctx){
+    if(U.poll)return;
     U.poll=setTimeout(()=>{
+      U.poll=null;
       if(ctx.generation!==U.generation)return;
-      if(document.querySelector('#detail-dialog[open]'))pollOverview(ctx);
-      else refreshPage(ctx).catch(error=>U.status(error.message,true));
+      loadOverview(ctx,true).catch(error=>U.status(error.message,true));
     },2500);
   }
   function jobRows(jobs){return jobs.length?U.records(jobs.map(job=>{
@@ -42,7 +40,7 @@
     const source=payload.commit?.slice(0,12)||((payload.release?.revision)?'Configuration '+payload.release.revision:job.kind==='update_all'&&Array.isArray(payload.targets)?payload.targets.length+' update targets':'');
     const testName=job.kind==='release'&&'test_configuration' in payload?'Tests: '+(payload.test_configuration?.name||'None'):'';
     const label=payload.release?.name||job.subject||({catalog:'Refresh catalogue',download_all:'Download all',update_all:'Update all',check:'Check status'}[job.kind])||job.kind;
-    return U.record('<h2 class="record-name">'+E(payload.repository_label||label)+'</h2><span class="record-subline">'+E([payload.target||payload.version,source,testName].filter(Boolean).join(' · '))+'</span>'+U.fields([['Started',E(U.date(job.started||job.created))],['Duration',elapsed!==null?elapsed+' s':'—'],['Status',status(job.status)],['Step',E(job.error||job.phase)]]),button('Log','job',job.id));
+    return U.record('<h2 class="record-name">'+E(payload.repository_label||label)+'</h2><span class="record-subline">'+E([payload.target||payload.version,source,testName].filter(Boolean).join(' · '))+'</span>'+U.fields([['Started',E(U.date(job.started||job.created))],['Duration',elapsed!==null?elapsed+' s':'—'],['Status',status(job.status)],['Step',E(job.error||job.phase)]]),button('Log','job',job.id),' data-record-key="'+E(job.id)+'"');
   }),'Jobs'):'';}
   function files(job){return (job.result.files||[]).map(file=>'<p><a class="artifact-link" href="/api/repositories/jobs/'+E(job.id)+'/files/'+E(file.id)+'">'+E(file.name)+'</a> · '+U.bytes(file.bytes)+'<br><small class="muted">SHA-256 '+E(file.sha256)+'</small></p>').join('');}
   U.views.repositories=async ctx=>{
@@ -52,7 +50,22 @@
     if(ctx.sub==='releases')return releaseView(ctx);
     if(ctx.sub==='test-configurations')return testView(ctx);
     if(ctx.sub==='logs')return logsView(ctx);
-    const state=await api('state');if(ctx.generation!==U.generation)return;lastState=state;
+    return loadOverview(ctx);
+  };
+  async function loadOverview(ctx,partial=false){
+    if(ctx.generation!==U.generation)return;
+    const request=++overviewRequest;clearTimeout(U.poll);U.poll=null;
+    try{
+      const state=await api('state');if(ctx.generation!==U.generation||request!==overviewRequest)return;
+      lastState=state;overviewGeneration=ctx.generation;renderOverview(ctx,state,partial);
+      if(ctx.leaf&&!partial)await details(ctx.leaf);
+    }catch(error){
+      if(ctx.generation!==U.generation||request!==overviewRequest)return;
+      if(!partial||overviewGeneration!==ctx.generation)throw error;
+      U.status('Could not refresh repository status. Retrying: '+error.message,true);pollOverview(ctx);
+    }
+  }
+  function renderOverview(ctx,state,partial=false){
     const jobs=state.active_jobs||state.jobs.filter(active),repos=state.repositories;
     const accounts=new Map();
     for(const item of [...(state.connections||[]).filter(connection=>connection.status==='ready'),...repos]){
@@ -64,37 +77,51 @@
     const catalogueErrors=(state.connections||[]).filter(connection=>connection.catalog?.error);
     if(catalogueErrors.length)html+=catalogueErrors.map(connection=>'<p class="workspace-notice" role="alert">'+E(connection.name)+' · '+E(connection.catalog.error)+'</p>').join('');
     else if(state.catalog.error)html+='<p class="workspace-notice" role="alert">Last known catalogue · '+E(state.catalog.error)+'</p>';
-    html+='<section class="record-section" aria-label="Repositories"><div class="repository-filters"><label class="repo-category">Category<select id="repository-category"><option value="">All categories</option>'+(state.categories||[]).map(value=>'<option value="'+E(value)+'"'+(category===value?' selected':'')+'>'+E(value)+'</option>').join('')+'</select></label><label class="repo-account">Account<select id="repository-account"><option value="">All Accounts</option>'+[...accounts].sort((a,b)=>a[1].localeCompare(b[1],'en',{sensitivity:'base'})).map(([key,owner])=>'<option value="'+E(key)+'"'+(account===key?' selected':'')+'>'+E(owner)+'</option>').join('')+'</select></label><label class="repo-search">Search<input id="repository-search" type="search" value="'+E(filter)+'" placeholder="Name, account or description"></label></div>';
-    html+=repos.length?'<div class="repository-list">'+U.records(repos.map(repo=>{
-      const local=repo.local||{},busy=jobs.some(job=>affectsRepository(job,repo));
-      const refreshing=repositoryRefreshPending.has(repo.name)||jobs.some(job=>job.kind==='refresh'&&job.subject===repo.name),refreshJob=repo.refresh_job;
-      const refreshBlocked=jobs.some(job=>['refresh','catalog','check','download','update','download_all','update_all','build','build_publish','app_publish','connection_delete'].includes(job.kind)&&affectsRepository(job,repo));
-      const refreshError=repositoryRefreshErrors.get(repo.name)||(['failed','interrupted'].includes(refreshJob?.status)?refreshJob.error||'The repository refresh was interrupted.':'');
+    html+='<section id="repository-overview" class="record-section" aria-label="Repositories"><div class="repository-filters"><label class="repo-category">Category<select id="repository-category"><option value="">All categories</option>'+(state.categories||[]).map(value=>'<option value="'+E(value)+'"'+(category===value?' selected':'')+'>'+E(value)+'</option>').join('')+'</select></label><label class="repo-account">Account<select id="repository-account"><option value="">All Accounts</option>'+[...accounts].sort((a,b)=>a[1].localeCompare(b[1],'en',{sensitivity:'base'})).map(([key,owner])=>'<option value="'+E(key)+'"'+(account===key?' selected':'')+'>'+E(owner)+'</option>').join('')+'</select></label><label class="repo-search">Search<input id="repository-search" type="search" value="'+E(filter)+'" placeholder="Name, account or description"></label></div>';
+    const matching=repos.some(repositoryMatches);
+    html+=repos.length?'<div class="repository-list"'+(matching?'':' hidden')+'>'+U.records(repos.map(repo=>{
+      const local=repo.local||{},feedback=U.entryRefresh.state(repo.name,repo.refresh_job),refreshing=feedback.busy;
+      const busy=refreshing||jobs.some(job=>affectsRepository(job,repo));
+      const refreshBlocked=jobs.some(job=>U.repositoryActions.includes(job.kind)&&affectsRepository(job,repo));
       const classification=repo.server_metadata?.category||'Undefined';
       const sourceAction=local.status==='outdated'?button('Update','update',repo.name,busy||!repo.available||local.dirty,true):button(local.commit||local.status==='empty'?'Downloaded':'Download','download',repo.name,busy||!!local.commit||local.status==='empty'||!repo.available);
       const content='<div class="record-head"><button class="repository-name" data-repo-action="details" data-name="'+E(repo.name)+'">'+E(repo.display_name||repo.name)+'</button><span class="record-aside repository-owner">'+E(repo.owner||'')+'</span></div><div class="record-grid repository-info"><div class="record-identity">'+(repo.description?'<p class="record-description">'+E(repo.description)+'</p>':'')+'<div class="repository-labels"><span class="badge">'+(repo.private?'Private':'Public')+'</span>'+(repo.archived?'<span class="badge">Archived</span>':'')+'</div>'+(!repo.available?'<p class="muted">'+E(repo.unavailable_reason)+'</p>':'')+'</div><div role="group" aria-label="Category"><span class="badge">'+E(classification)+'</span></div><div class="repository-local" role="group" aria-label="Local status" data-local-status="'+E(!repo.available?'unavailable':local.status||'missing')+'">'+status(!repo.available?'Access unavailable':local.status||'missing')+(local.commit?'<p><code>'+E(local.commit.slice(0,12))+'</code> · '+E(local.branch||'')+'</p>':'')+'</div></div>';
-      const refreshAction=button(refreshing?'Refreshing…':'Refresh','refresh',repo.name,refreshing||refreshBlocked||!repo.available,false,!repo.available?repo.unavailable_reason:refreshing?'Refreshing this repository…':refreshBlocked?'Wait for the current repository action to finish.':'Refresh metadata, source status and GitHub release status.','Refresh '+(repo.owner?repo.owner+'/':'')+(repo.display_name||repo.name),refreshing);
-      const actions=refreshAction+sourceAction+button('Build','build_publish',repo.name,!repo.build_release?.enabled||busy,false,repo.build_release?.reason||'Checking build readiness…')+button('Edit','edit',repo.name)+'<label class="repository-publish"><input type="checkbox" data-repository-publish="'+E(repo.name)+'" title="Show in Apps" aria-label="Show in Apps '+E(repo.display_name||repo.name)+'"'+(repo.published||repo.publishing?' checked':'')+((busy&&!repo.publishing)||(!repo.available&&!repo.published&&!repo.publishing)?' disabled':'')+'>Show in Apps'+(repo.publishing?'…':'')+'</label>'+(repo.publish_error?'<p class="form-message" role="alert">'+E(repo.publish_error)+'</p>':'')+(refreshError?'<div class="repository-refresh-message" role="alert"><span>'+E('Refresh failed: '+refreshError)+'</span>'+(refreshJob&&!repositoryRefreshErrors.has(repo.name)?button('Log','job',refreshJob.id):'')+'</div>':'');
-      return U.record(content,actions,' data-repo-search="'+E(((repo.display_name||repo.name)+' '+(repo.owner||'')+' '+repo.description).toLowerCase())+'" data-category="'+E(classification)+'" data-account="'+E((repo.owner||'').toLowerCase())+'"','repository-entry');
-    }),'Repository overview')+'</div><div id="repository-filter-empty" hidden>'+U.empty('No matching repositories','Choose another category or change the search.')+'</div>':U.empty('No catalogue yet','Connect an account and enable its repositories in Connections.');
+      const refreshAction=button(refreshing?'Refreshing…':feedback.error?'Retry':feedback.updated?'Updated':'Refresh','refresh',repo.name,refreshing||refreshBlocked||!repo.available,false,!repo.available?repo.unavailable_reason:refreshing?'Refreshing this repository…':refreshBlocked?'Wait for the current repository action to finish.':'Refresh metadata, source status and GitHub release status.','Refresh '+(repo.owner?repo.owner+'/':'')+(repo.display_name||repo.name),refreshing);
+      const actions=refreshAction+sourceAction+button('Build','build_publish',repo.name,!repo.build_release?.enabled||busy,false,repo.build_release?.reason||'Checking build readiness…')+button('Edit','edit',repo.name)+'<label class="repository-publish"><input type="checkbox" data-repository-publish="'+E(repo.name)+'" title="Show in Apps" aria-label="Show in Apps '+E(repo.display_name||repo.name)+'"'+(repo.published||repo.publishing?' checked':'')+((busy&&!repo.publishing)||(!repo.available&&!repo.published&&!repo.publishing)?' disabled':'')+'>Show in Apps'+(repo.publishing?'…':'')+'</label>'+(repo.publish_error?'<p class="form-message" role="alert">'+E(repo.publish_error)+'</p>':'')+(feedback.error?'<div class="repository-refresh-message" role="alert"><span>'+E('Refresh failed: '+feedback.error)+'</span>'+(feedback.log?button('Log','job',feedback.log):'')+'</div>':'');
+      return U.record(content,actions,' data-record-key="'+E(repo.name)+'" aria-busy="'+refreshing+'" data-repo-search="'+E(repositorySearch(repo))+'" data-category="'+E(classification)+'" data-account="'+E((repo.owner||'').toLowerCase())+'"'+(repositoryMatches(repo)?'':' hidden'),'repository-entry'+(refreshing?' is-refreshing':''));
+    }),'Repository overview')+'</div><div id="repository-filter-empty"'+(matching?' hidden':'')+'>'+U.empty('No matching repositories','Choose another category or change the search.')+'</div>':U.empty('No catalogue yet','Connect an account and enable its repositories in Connections.');
     html+='</section>';
-    if(jobs.length)html+='<section class="record-section"><div class="panel-heading"><h2>Active jobs</h2></div>'+jobRows(jobs)+'</section>';
+    if(jobs.length)html+='<section id="repository-active-jobs" class="record-section"><div class="panel-heading"><h2>Active jobs</h2></div>'+jobRows(jobs)+'</section>';
     const repositoryBusy=jobs.some(job=>['refresh','catalog','check','download','download_all','update','update_all','connection_delete'].includes(job.kind));
     const canDownload=repos.some(repo=>repo.available&&!repo.local.commit&&!['empty','conflict'].includes(repo.local.status));
     const updates=state.update_count||0;
     const actions=button('Download all','download_all','',repositoryBusy||!canDownload)+button('Update All ('+U.count(updates)+')','update_all','',repositoryBusy||!updates,!!updates);
-    U.page(ctx,'Repositories','',html,actions,button('Refresh','catalog','',repositoryBusy));
+    U.page(ctx,'Repositories','',html,actions,button('Refresh','catalog','',repositoryBusy),partial);
     U.status(jobs.some(job=>job.kind==='catalog'||job.kind==='refresh')?'Refreshing repositories…':'Repositories loaded.');
     applyFilter();
-    if(ctx.leaf)await details(ctx.leaf);
-    if(jobs.length||repos.some(repo=>repo.publishing||repo.build_release?.checking||repo.refresh_job&&active(repo.refresh_job)))pollOverview(ctx);
-  };
+    if(jobs.length||repos.some(repo=>repo.publishing||repo.build_release?.checking||U.entryRefresh.state(repo.name,repo.refresh_job).busy))pollOverview(ctx);
+  }
+  window.addEventListener('entry-refresh',event=>{
+    const ctx=U.current;if(ctx?.view!=='repositories'||ctx.sub!=='overview')return;
+    const {name,phase,job}=event.detail;
+    if(lastState&&overviewGeneration===ctx.generation){
+      if(job){
+        const repo=lastState.repositories.find(item=>item.name===name);if(repo)repo.refresh_job=job;
+        lastState.active_jobs=[...(lastState.active_jobs||lastState.jobs.filter(active)).filter(item=>item.id!==job.id),job].filter(active);
+      }
+      renderOverview(ctx,lastState,true);
+    }
+    if(phase==='submitted'||phase==='error')loadOverview(ctx,true).catch(error=>U.status(error.message,true));
+  });
   function applyFilter(){
     const rows=[...document.querySelectorAll('[data-repo-search]')];
-    rows.forEach(row=>row.hidden=!row.dataset.repoSearch.includes(filter.toLowerCase())||(!!category&&row.dataset.category!==category)||(!!account&&row.dataset.account!==account));
+    rows.forEach(row=>{
+      const hidden=!row.dataset.repoSearch.includes(filter.toLowerCase())||(!!category&&row.dataset.category!==category)||(!!account&&row.dataset.account!==account);
+      if(row.hidden!==hidden)row.hidden=hidden;
+    });
     const matches=rows.some(row=>!row.hidden),list=document.querySelector('.repository-list');
-    if(list)list.hidden=!matches;
-    const empty=document.querySelector('#repository-filter-empty');if(empty)empty.hidden=matches;
+    if(list&&list.hidden===matches)list.hidden=!matches;
+    const empty=document.querySelector('#repository-filter-empty');if(empty&&empty.hidden!==matches)empty.hidden=matches;
   }
   async function openBuild(name){
     const generation=U.generation,value=await api('items/'+encodeURIComponent(name)+'/build');
@@ -140,7 +167,7 @@
   async function showJob(id,reset=true){
     if(reset){dialogJob=id;dialogOffset=0;dialogText='';dialogGeneration=U.generation;}
     const job=await api('jobs/'+id),log=await api('jobs/'+id+'/log?offset='+dialogOffset);
-    if(dialogJob!==id)return;
+    if(dialogJob!==id||dialogGeneration!==U.generation)return;
     dialogOffset=log.offset;dialogText=(dialogText+log.text).slice(-250000);
     const sdkResult=(job.kind.startsWith('sdk_')||job.kind.startsWith('tools_'))&&Object.keys(job.result||{}).length?U.fold('SDK result',job.result):'';
     const summary=job.result.repositories?'<p>'+(job.kind==='update_all'?U.count(job.result.target_count??job.payload.targets?.length??0)+' update targets · ':'')+U.count(job.result.repositories.filter(item=>item.status!=='failed'&&item.status!=='skipped').length)+' successful · '+U.count(job.result.repositories.filter(item=>item.status==='skipped').length)+' skipped · '+U.count(job.result.failed||0)+' failed</p>'+U.fold('Individual results',job.result.repositories):'';
@@ -391,7 +418,7 @@
   });
   document.addEventListener('change',async event=>{
     const checkbox=event.target;if(!checkbox.matches('[data-repository-publish]'))return;
-    const selected=checkbox.checked;checkbox.disabled=true;
+    const selected=checkbox.checked,ctx=U.current;checkbox.disabled=true;checkbox.dataset.pending='true';
     try{
       const repo=await api('items/'+encodeURIComponent(checkbox.dataset.repositoryPublish)+'/publication',{method:'PUT',body:{published:selected}});
       if(checkbox.isConnected)checkbox.checked=repo.published||repo.publishing;
@@ -399,7 +426,11 @@
       if(repo.publishing)pollOverview(U.current);
       U.status(repo.publishing?'Adding app to the list…':selected?'App listed. Open Apps → Overview to edit its settings.':'App removed from the Apps overview.');
     }catch(error){if(checkbox.isConnected)checkbox.checked=!selected;U.status(error.message,true);}
-    finally{if(checkbox.isConnected)checkbox.disabled=false;}
+    finally{
+      checkbox.removeAttribute('data-pending');
+      if(checkbox.isConnected)checkbox.disabled=false;
+      if(ctx.generation===U.generation&&overviewGeneration===ctx.generation)loadOverview(ctx,true).catch(error=>U.status(error.message,true));
+    }
   });
   document.addEventListener('change',event=>{
     if(event.target.id==='sdk-release'){sdkChoice=event.target.value;sdkStored('sdk-release',sdkChoice);sdkError='';applySdk();}
@@ -415,6 +446,7 @@
     const action=node.dataset.repoAction,name=node.dataset.name;
     if(action==='test_file_add'){document.querySelector('#test-files').insertAdjacentHTML('beforeend',testFileRow());return;}
     if(action==='test_file_remove'){node.closest('.test-file-row').remove();return;}
+    if(action==='refresh'){await U.entryRefresh.request(name);return;}
     if(['details','job','edit'].includes(action))dialogTrigger=node;
     node.disabled=true;
     try{
@@ -445,14 +477,6 @@
         if(ctx.generation===U.generation)await refreshPage(ctx);
         return;
       }
-      if(action==='refresh'){
-        repositoryRefreshErrors.delete(name);repositoryRefreshPending.add(name);node.classList.add('is-loading');node.setAttribute('aria-busy','true');
-        try{await api('actions/refresh',{method:'POST',body:{name}});}
-        catch(error){repositoryRefreshErrors.set(name,error.message);}
-        finally{repositoryRefreshPending.delete(name);}
-        if(U.current.view==='repositories'&&U.current.sub==='overview')await refreshPage(U.current);
-        return;
-      }
       let job;
       if(action==='sdk_verify'){job=await sdk('packages/'+name+'/verify',{method:'POST',body:{}});}
       else if(action==='sdk_describe'||action==='sdk_resolve'){const [id,profile]=name.split('|');job=await sdk('profiles/'+id+'/'+action.slice(4),{method:'POST',body:{profile}});}
@@ -460,7 +484,10 @@
       else if(action.startsWith('tools_'))job=await api('tools/actions/'+action.slice(6).replace('_component',''),{method:'POST',body:action.endsWith('_component')?{component:name}:{id:name||undefined}});
       else job=await api('actions/'+action,{method:'POST',body:{name:name||undefined}});
       await showJob(job.id);U.status('Job started.');
-    }catch(error){U.status(error.message,true);}finally{node.disabled=false;}
+    }catch(error){U.status(error.message,true);}finally{
+      if(node.isConnected&&U.current.view==='repositories'&&U.current.sub==='overview'&&overviewGeneration===U.generation)renderOverview(U.current,lastState,true);
+      else node.disabled=false;
+    }
   });
   document.addEventListener('submit',async event=>{
     if(event.target.id==='sdk-custom-url'){
@@ -499,10 +526,10 @@
     }
 
     if(event.target.id==='repository-metadata'){
-      event.preventDefault();const form=event.target,submit=form.querySelector('[type=submit]');submit.disabled=true;
+      event.preventDefault();const form=event.target,ctx=U.current,submit=form.querySelector('[type=submit]');submit.disabled=true;
       try{
         await api('items/'+encodeURIComponent(form.dataset.name)+'/metadata',{method:'PUT',body:{category:new FormData(form).get('category')}});
-        await refreshPage(U.current);U.status('Repository category saved.');
+        if(ctx.generation===U.generation&&form.isConnected){await refreshPage(ctx);if(form.isConnected)form.closest('dialog').close();U.status('Repository category saved.');}
       }catch(error){form.querySelector('.form-message').textContent=error.message;submit.disabled=false;}
       return;
     }

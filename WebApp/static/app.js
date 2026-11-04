@@ -25,13 +25,84 @@ window.R4 = (() => {
   ui.card = (label,value,note='') => '<div class="metric-card"><span>'+esc(label)+'</span><strong>'+esc(value)+'</strong><small>'+esc(note)+'</small></div>';
   ui.show = (ctx,html) => {if(ctx.generation===ui.generation) content.innerHTML=html;};
   ui.scrollContainer = () => content.querySelector('.page-scroll') || content;
+  ui.patch = (parent,html) => {
+    const template=document.createElement('template');template.innerHTML=html;
+    const focused=document.activeElement,scroller=ui.scrollContainer(),scroll=scroller.scrollTop;
+    const key=node=>node.nodeType===1?(node.id?'id:'+node.id:node.dataset.recordKey?'record:'+node.dataset.recordKey:node.dataset.repoAction?'repo:'+node.dataset.repoAction+':'+(node.dataset.name||''):node.dataset.appRefresh?'app:'+node.dataset.appRefresh:null):null;
+    const compatible=(node,wanted)=>node.nodeType===wanted.nodeType&&node.nodeName===wanted.nodeName;
+    function children(parent,wanted){
+      const original=[...parent.childNodes],used=new Set(),keys=new Map(original.filter(key).map(node=>[key(node),node]));
+      let cursor=parent.firstChild;
+      for(const next of wanted){
+        const identity=key(next);
+        let node=identity?keys.get(identity):original.find(item=>!used.has(item)&&!key(item)&&compatible(item,next));
+        if(!node||!compatible(node,next))node=next.cloneNode(true);
+        used.add(node);
+        if(node!==cursor)parent.insertBefore(node,cursor);
+        if(node.nodeType===1){
+          // Pending form controls belong to their in-flight write, not an older poll.
+          if(!node.hasAttribute('data-pending')){
+            for(const attr of [...node.attributes])if(!next.hasAttribute(attr.name))node.removeAttribute(attr.name);
+            for(const attr of next.attributes)if(node.getAttribute(attr.name)!==attr.value)node.setAttribute(attr.name,attr.value);
+            children(node,[...next.childNodes]);
+            if(node instanceof HTMLInputElement){
+              if(node.type==='checkbox'||node.type==='radio'){if(node.checked!==next.checked)node.checked=next.checked;}
+              else if(node.value!==next.value)node.value=next.value;
+            }
+            if(node instanceof HTMLSelectElement&&node.value!==next.value)node.value=next.value;
+          }
+        }else if(node.nodeValue!==next.nodeValue)node.nodeValue=next.nodeValue;
+        cursor=node.nextSibling;
+      }
+      for(const node of original)if(!used.has(node))node.remove();
+    }
+    children(parent,[...template.content.childNodes]);
+    if(focused?.isConnected&&document.activeElement!==focused&&!focused.disabled)focused.focus({preventScroll:true});
+    if(scroller.isConnected)scroller.scrollTop=scroll;
+  };
   ui.refreshIcon = '<svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true"><use href="#icon-refresh"/></svg>';
-  ui.page = (ctx,title,description,html,actions='',refresh=true) => {
+  ui.updatedIcon = '<svg class="button-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4 4L19 6"/></svg>';
+  ui.page = (ctx,title,description,html,actions='',refresh=true,partial=false) => {
     // A supplied refresh button keeps page-specific actions such as catalogue refresh.
     const refreshButton=typeof refresh==='string'?refresh:refresh?'<button type="button" class="button subtle" data-action="refresh">'+ui.refreshIcon+'<span>Refresh</span></button>':'';
     const toolbar=refreshButton||actions?'<header class="page-toolbar"><div class="page-toolbar-inner" role="toolbar" aria-label="Page actions">'+(refreshButton?'<div class="page-refresh">'+refreshButton+'</div>':'')+(actions?'<div class="page-actions">'+actions+'</div>':'')+'</div></header>':'';
-    ui.show(ctx,toolbar+'<div class="page-scroll" role="region" aria-label="'+esc(title||'Page')+' content" tabindex="0"><section class="feature-page">'+html+'</section></div>');
+    const markup=toolbar+'<div class="page-scroll" role="region" aria-label="'+esc(title||'Page')+' content" tabindex="0"><section class="feature-page">'+html+'</section></div>';
+    if(ctx.generation!==ui.generation)return;
+    if(partial&&content.querySelector('.page-scroll'))ui.patch(content,markup);
+    else ui.show(ctx,markup);
   };
+  ui.affectsRepository = (job,repo) => {
+    if(job.subject===repo.name)return true;
+    if(job.kind==='connection_delete')return job.subject===repo.connection_id;
+    if(job.kind==='update_all'&&Array.isArray(job.payload?.targets))return job.payload.targets.some(target=>target.name===repo.name);
+    return ['catalog','check','download_all','update_all'].includes(job.kind)&&!job.subject&&(!job.payload?.connection_id||job.payload.connection_id===repo.connection_id);
+  };
+  ui.repositoryActions=['refresh','catalog','check','download','update','download_all','update_all','build','build_publish','app_publish','connection_delete'];
+  ui.entryRefresh = (() => {
+    const requests=new Map(),errors=new Map(),watched=new Map(),updated=new Map();
+    const notify=(name,phase,job=null)=>window.dispatchEvent(new CustomEvent('entry-refresh',{detail:{name,phase,job}}));
+    function state(name,job){
+      const active=job&&['queued','running'].includes(job.status),pending=requests.has(name);
+      if(active){watched.set(name,job.id);updated.delete(name);}
+      else if(job?.status==='completed'&&watched.get(name)===job.id){
+        watched.delete(name);updated.set(name,job.id);errors.delete(name);
+        setTimeout(()=>{if(updated.get(name)===job.id){updated.delete(name);notify(name,'feedback');}},2500);
+      }
+      const busy=pending||!!active,error=busy?'':errors.get(name)||(['failed','interrupted'].includes(job?.status)?job.error||'The refresh was interrupted.':'');
+      return {busy,error,updated:!busy&&!error&&updated.has(name),log:!errors.has(name)&&error?job?.id:null};
+    }
+    function request(name){
+      if(requests.has(name))return requests.get(name);
+      errors.delete(name);updated.delete(name);
+      let job=null;
+      const promise=ui.api('repositories/actions/refresh',{method:'POST',body:{name}})
+        .then(value=>{job=value;watched.set(name,value.id);return value;})
+        .catch(error=>{errors.set(name,error.message);return null;})
+        .finally(()=>{requests.delete(name);notify(name,job?'submitted':'error',job);});
+      requests.set(name,promise);notify(name,'pending');return promise;
+    }
+    return {state,request};
+  })();
   ui.side = (ctx,items) => {
     const label={apps:'Apps',updates:'Update Center',benchmarks:'Benchmarks',repositories:'Repositories',settings:'Settings'}[ctx.view];
     document.querySelector('.submenu-column:not(.third-column)').innerHTML='<nav class="secondary-navigation" aria-label="'+esc(label)+' views">'+items.map(([id,label])=>'<a class="sub-item" href="#'+ctx.view+'/'+id+'"'+(ctx.sub===id?' aria-current="page"':'')+'>'+esc(label)+'</a>').join('')+'</nav>';

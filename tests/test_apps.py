@@ -187,7 +187,7 @@ class AppTests(unittest.TestCase):
             response = connection.getresponse();raw = response.read();connection.close()
             return response.status, json.loads(raw) if raw else None
         try:
-            self.assertEqual(request('/api/apps/overview')[1], {'apps': [], 'publishing': 0})
+            self.assertEqual(request('/api/apps/overview')[1], {'apps': [], 'publishing': 0, 'active_jobs': []})
             route = '/api/repositories/items/minesweeper/publication'
             self.assertEqual(request(route, 'PUT', {'published': True})[0], 403)
             self.assertEqual(request(route, 'PUT', {'published': True}, {'Origin': 'https://other.invalid'})[0], 403)
@@ -201,5 +201,18 @@ class AppTests(unittest.TestCase):
             self.assertEqual(saved['install_path'], 'C:\\Software\\MINESWEEPER_665F9DD0')
             self.assertEqual(request('/api/apps/overview')[1]['apps'][0]['description'], '<b>Literal text</b>')
             self.assertEqual(request('/api/apps/items/minesweeper', 'PUT', self.settings(install_path='../bad'), headers)[0], 422)
+            status, job = request('/api/repositories/actions/refresh', 'POST', {'name': 'minesweeper'}, headers)
+            self.assertEqual(status, 202)
+            overview = request('/api/apps/overview')[1]
+            self.assertEqual(overview['active_jobs'][0]['id'], job['id'])
+            self.assertEqual(overview['apps'][0]['refresh_job']['status'], 'queued')
+            self.assertTrue(overview['apps'][0]['repository_available'])
+            self.assertEqual(overview['apps'][0]['connection_id'], 'main')
+            self.store.change_job(job['id'], status='failed', error='Fixture refresh failed')
+            failed = request('/api/apps/overview')[1]
+            self.assertEqual(failed['active_jobs'], [])
+            self.assertEqual(failed['apps'][0]['refresh_job']['error'], 'Fixture refresh failed')
+            self.assertEqual(failed['apps'][0]['display_name'], 'Minesweeper')
+            self.assertEqual(failed['apps'][0]['description'], '<b>Literal text</b>')
         finally:
             server.shutdown();server.server_close();thread.join(timeout=5)

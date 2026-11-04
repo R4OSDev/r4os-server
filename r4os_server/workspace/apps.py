@@ -104,6 +104,8 @@ def record(store, row, repo=None):
     repo = repo or store.repository(row['repository_name'])
     default_path = 'C:\\Software\\'+row['manifest_name']
     return {'repository': row['repository_name'], 'repository_name': repo['display_name'], 'owner': repo['owner'],
+            'connection_id': repo['connection_id'], 'repository_available': repo['available'],
+            'repository_error': repo['unavailable_reason'], 'refresh_job': repo['refresh_job'],
             'private': repo['private'], 'published': bool(row['published']),
             'manifest_name': row['manifest_name'], 'version': row['manifest_version'],
             'default_display_name': row['manifest_name'], 'display_name_override': row['display_name_override'],
@@ -245,7 +247,7 @@ def dispatch(handler):
         if parts == ['overview'] and handler.command in ('GET', 'HEAD'):
             with store.connect() as db:
                 pending = db.execute("SELECT count(*) FROM jobs WHERE kind='app_publish' AND status IN ('queued','running') AND cancel=0").fetchone()[0]
-            return handler.json(200, {'apps': overview(store), 'publishing': pending})
+            return handler.json(200, {'apps': overview(store), 'publishing': pending, 'active_jobs':store.active_jobs()})
         if len(parts) == 2 and parts[0] == 'items':
             if handler.command in ('GET', 'HEAD'):
                 return handler.json(200, get(store, parts[1]))
