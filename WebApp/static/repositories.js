@@ -5,6 +5,8 @@
   let filter='',category='',account='',lastState=null,dialogJob=null,dialogOffset=0,dialogText='',dialogGeneration=0,dialogTrigger=null;
   const sdkStored=(key,value)=>{try{if(value===undefined)return sessionStorage.getItem(key)||'';sessionStorage.setItem(key,value);}catch{}return '';};
   let sdkChoice=sdkStored('sdk-release'),sdkCustom=sdkStored('sdk-custom'),sdkData=null,sdkError='',sdkSending=false,sdkRequest=0;
+  let sdkTools=null,sdkDetailsOpen=sdkStored('sdk-details-open')==='1';
+  const sdkToolDrafts=new Map();
   const active=job=>['queued','running'].includes(job.status);
   const status=value=>'<span class="badge">'+E(states[value]||value||'Unknown')+'</span>';
   const button=(label,action,name='',disabled=false,primary=false,title='')=>'<button type="button" class="button '+(primary?'primary':'subtle')+'" data-repo-action="'+E(action)+'" data-name="'+E(name)+'"'+(disabled?' disabled':'')+(title?' title="'+E(title)+'"':'')+'>'+(['catalog','sdk_refresh'].includes(action)?U.refreshIcon:'')+E(label)+'</button>';
@@ -193,16 +195,54 @@
     if(messageJob){node.dataset.repoAction='job';node.dataset.name=messageJob;}
     else{delete node.dataset.repoAction;delete node.dataset.name;}
     main.setAttribute('aria-busy',String(busy||sdkSending));
+    updateSdkDetails();
   }
-  async function readSdk(ctx,refresh=false,custom=sdkCustom){
+  function sdkPackagesHtml(packages){
+    return U.records(packages.map(item=>{
+        let content='<h2 class="record-name">SDK '+E(item.version)+'</h2><span class="record-subline">'+E(item.status)+'</span>'+(item.error?'<p class="notice error">'+E(item.error)+'</p>':'')+U.fields([['Package ID','<code>'+E(item.id)+'</code>'],['Source revision','<code>'+E(item.source.commit)+'</code>']]);
+        if(item.status==='ready'){
+          content+=U.records(Object.entries(item.profiles).map(([id,profile])=>U.record('<h3 class="record-name">'+E(id)+'</h3>'+U.fields([['Language / role',E(profile.language+' / '+profile.role)],['Tools / components',E(profile.toolset+' / '+profile.components)]]),button('Describe','sdk_describe',item.id+'|'+id)+button('Resolve','sdk_resolve',item.id+'|'+id))),'SDK profiles');
+          content+=U.fold('Tools and host variants',item.tools)+U.fold('Bound components',{sets:item.component_sets,sources:item.source_bindings,libraries:item.system_libraries})+U.fold('Original profile hashes',item.profile_sources);
+          content+=U.records(item.assets.map(asset=>U.record('<h3 class="record-name">'+E(asset.path)+'</h3>'+U.fields([['Role',E(asset.role)],['Size',E(U.bytes(asset.bytes))]]),'<a class="button subtle" href="/api/sdk/assets/'+E(item.id)+'/'+E(asset.path)+'">Download</a>')),'Original SDK assets');
+        }
+        return U.record(content,item.status==='ready'?button('Verify package','sdk_verify',item.id):'');
+      }),'SDK packages');
+  }
+  function updateSdkDetails(){
+    const slot=document.querySelector('#sdk-tool-setup'),statusArea=document.querySelector('#sdk-tool-status');if(!slot||!sdkTools)return;
+    const packageInfo=sdkTools.packages.find(item=>item.release_url===sdkChoice&&item.status==='ready');
+    const installed=sdkTools.toolsets.filter(item=>item.sdk_id===packageInfo?.id);
+    const environment=installed.find(item=>item.id===sdkTools.active)||installed.find(item=>item.status==='ready');
+    const labels={zig:'Zig',rust:'Rust',limine:'Limine',qemu:'QEMU (optional)'};
+    const names=Object.keys(labels).filter(name=>packageInfo?.tools[name]);
+    const defaults=environment?.installed_tools||[...new Set(Object.values(packageInfo?.toolsets||{}).flatMap(item=>item.tools))].filter(name=>name!=='qemu');
+    const checked=sdkToolDrafts.get(packageInfo?.id)||defaults;
+    const signature=JSON.stringify([packageInfo?.id,names,defaults]);
+    if(slot.dataset.sdk!==String(packageInfo?.id||'')||(slot.dataset.signature!==signature&&!slot.querySelector('[data-tools-dirty]'))){
+      slot.dataset.sdk=packageInfo?.id||'';slot.dataset.signature=signature;
+      slot.innerHTML=packageInfo?'<form id="sdk-setup"><input type="hidden" name="sdk_id" value="'+E(packageInfo.id)+'"><p class="muted">Tools for SDK '+E(packageInfo.version)+'</p><fieldset class="sdk-tools-options"><legend>SDK-owned tools</legend>'+names.map(name=>'<label class="toggle-control"><input type="checkbox" name="tools" value="'+E(name)+'"'+(checked.includes(name)?' checked':'')+'> '+E(labels[name])+'</label>').join('')+'</fieldset><p class="muted">Graphics, shader and platform prerequisites are verified by their native owner builders.</p><button type="submit" class="button primary">Set up tools and activate</button><p class="form-message" role="alert"></p></form>':'<p class="muted">Download and activate the selected SDK to configure its tools.</p>';
+    }
+    const pending=(sdkTools.jobs||[]).some(job=>active(job)&&['sdk_select','sdk_import','sdk_cleanup','tools_install','tools_update','tools_activate'].includes(job.kind));
+    const submit=slot.querySelector('[type="submit"]');if(submit)submit.disabled=pending||!slot.querySelector('[name="tools"]:checked');
+    statusArea.innerHTML=U.fields([['Host',E(sdkTools.host)],['Active SDK',E(sdkTools.sdk?.version||'Not configured')]])+U.table(['Tool','SDK requirement','Installed','State'],sdkTools.components.map(item=>[E(item.name),E(item.required),E(item.installed||'—'),E(item.state)]));
+    const check=document.querySelector('[data-repo-action="tools_check"]');if(check)check.disabled=!sdkTools.active;
+    const packages=document.querySelector('#sdk-package-details');
+    const packageSignature=JSON.stringify(sdkTools.packages.map(item=>[item.id,item.status,item.error]));
+    if(packages.dataset.signature!==packageSignature){packages.innerHTML=sdkPackagesHtml(sdkTools.packages);packages.dataset.signature=packageSignature;}
+    packages.hidden=!sdkTools.packages.length;
+    const environments=document.querySelector('#sdk-installed-environments');
+    environments.innerHTML=sdkTools.toolsets.length?U.table(['SDK','State','Installed tools'],sdkTools.toolsets.map(item=>[E(sdkTools.packages.find(pkg=>pkg.id===item.sdk_id)?.version||item.sdk_id)+'<br><small class="muted">'+E(item.id)+'</small>',E(item.id===sdkTools.active?'Active':states[item.status]||item.status),E((item.installed_tools||[]).join(', ')||'—')])):'<p class="muted">No SDK environments installed.</p>';
+  }
+  async function readSdk(ctx,refresh=false,custom=sdkCustom,reloadTools=true){
     const request=++sdkRequest,query=new URLSearchParams();if(refresh)query.set('refresh','1');if(custom)query.set('release_url',custom);
-    const data=await sdk('releases'+(query.size?'?'+query:''));
+    const [data,tools]=await Promise.all([sdk('releases'+(query.size?'?'+query:'')),reloadTools?sdk('tools'):Promise.resolve(null)]);
     if(request!==sdkRequest||ctx.generation!==U.generation)return null;
+    if(tools)sdkTools=tools;
     sdkData=data;return data;
   }
   function pollSdk(ctx){
     clearTimeout(U.poll);
-    if(!sdkData?.catalog?.refreshing&&(!sdkData?.job||!active(sdkData.job)))return;
+    if(!sdkData?.catalog?.refreshing&&(!sdkData?.job||!active(sdkData.job))&&!(sdkTools?.jobs||[]).some(active))return;
     U.poll=setTimeout(async()=>{
       if(ctx.generation!==U.generation)return;
       if(!document.querySelector('#detail-dialog[open]')){
@@ -214,7 +254,10 @@
     },2000);
   }
   async function tools(ctx){
-    const pages=[['sdk','SDK'],['build-environment','Build Environment'],['environments','Environments'],['development','Development'],['maintenance','Maintenance'],['jobs','Jobs']];
+    const pages=[['sdk','SDK'],['development','Development'],['maintenance','Maintenance'],['jobs','Jobs']];
+    if(['build-environment','environments'].includes(ctx.leaf)){
+      sdkDetailsOpen=true;sdkStored('sdk-details-open','1');ctx.leaf='sdk';history.replaceState(null,'','#repositories/tools/sdk');
+    }
     const selected=pages.some(([id])=>id===ctx.leaf)?ctx.leaf:'sdk';
     U.context({...ctx,leaf:selected},pages);
     const value=await sdk('tools');if(ctx.generation!==U.generation)return;
@@ -222,22 +265,10 @@
     const ready=value.packages.filter(item=>item.status==='ready');
     let html='';
     if(selected==='sdk'){
-      try{await readSdk(ctx);sdkError='';}catch(error){sdkError=error.message;}if(ctx.generation!==U.generation)return;
+      sdkTools=value;
+      try{await readSdk(ctx,false,sdkCustom,false);sdkError='';}catch(error){sdkError=error.message;}if(ctx.generation!==U.generation)return;
       html=sdkMarkup();
-      const packages=value.packages.map(item=>{
-        let content='<h2 class="record-name">SDK '+E(item.version)+'</h2><span class="record-subline">'+E(item.status)+'</span>'+(item.error?'<p class="notice error">'+E(item.error)+'</p>':'')+U.fields([['Package ID','<code>'+E(item.id)+'</code>'],['Source revision','<code>'+E(item.source.commit)+'</code>']]);
-        if(item.status==='ready'){
-          content+=U.records(Object.entries(item.profiles).map(([id,profile])=>U.record('<h3 class="record-name">'+E(id)+'</h3>'+U.fields([['Language / role',E(profile.language+' / '+profile.role)],['Tools / components',E(profile.toolset+' / '+profile.components)]]),button('Describe','sdk_describe',item.id+'|'+id)+button('Resolve','sdk_resolve',item.id+'|'+id))),'SDK profiles');
-          content+=U.fold('Tools and host variants',item.tools)+U.fold('Bound components',{sets:item.component_sets,sources:item.source_bindings,libraries:item.system_libraries})+U.fold('Original profile hashes',item.profile_sources);
-          content+=U.records(item.assets.map(asset=>U.record('<h3 class="record-name">'+E(asset.path)+'</h3>'+U.fields([['Role',E(asset.role)],['Size',E(U.bytes(asset.bytes))]]),'<a class="button subtle" href="/api/sdk/assets/'+E(item.id)+'/'+E(asset.path)+'">Download</a>')),'Original SDK assets');
-        }
-        return U.record(content,item.status==='ready'?button('Verify package','sdk_verify',item.id):'');
-      });
-      if(packages.length)html+='<details class="sdk-details"><summary>Package details</summary><section class="record-section" aria-label="SDK packages">'+U.records(packages,'SDK packages')+'</section></details>';
-    }else if(selected==='build-environment'){
-      html='<section class="panel panel-body"><h2>Build environment</h2><p>Host: '+E(value.host)+' · Active SDK: '+E(value.sdk?.version||'Not configured')+'</p><form id="sdk-setup"><label>Verified SDK<select name="sdk_id" required>'+ready.map(item=>'<option value="'+E(item.id)+'"'+(item.id===value.sdk?.id?' selected':'')+'>'+E(item.version+' · '+item.source.commit.slice(0,12))+'</option>').join('')+'</select></label><fieldset><legend>SDK-owned setup</legend>'+['zig','rust','limine','qemu'].map(name=>'<label class="toggle-control"><input type="checkbox" name="tools" value="'+name+'"'+(['zig','rust'].includes(name)?' checked':'')+'> '+E(name)+'</label>').join('')+'</fieldset><p class="muted">Graphics, shader and platform prerequisites are verified by their native owner builders.</p><button type="submit" class="button primary"'+(!ready.length?' disabled':'')+'>Set up and activate</button> '+button('Check active environment','tools_check','',!value.active)+'<p class="form-message" role="alert"></p></form>'+U.table(['Tool','SDK requirement','Installed','State'],value.components.map(item=>[E(item.name),E(item.required),E(item.installed||'—'),E(item.state)]))+'</section>';
-    }else if(selected==='environments'){
-      html='<section class="record-section"><div class="panel-heading"><h2>Installed SDK environments</h2></div>'+(value.toolsets.length?U.records(value.toolsets.map(item=>U.record('<h2 class="record-name">'+E(item.id)+'</h2><span class="record-subline">'+E(item.id===value.active?'Active':item.status)+'</span>',button('Activate','tools_activate',item.id,item.id===value.active||item.status!=='ready'))),'Installed SDK environments'):U.empty('No SDK environments','Set up a verified SDK in Build Environment.'))+'</section>';
+      html+='<details id="sdk-details" class="sdk-details"'+(sdkDetailsOpen?' open':'')+'><summary>SDK details</summary><section class="sdk-details-content"><section class="panel panel-body"><h2>Build tools</h2><div id="sdk-tool-status"></div><div class="form-actions">'+button('Check active SDK','tools_check','',!value.active)+'</div><div id="sdk-tool-setup"></div></section><details class="sdk-installed"><summary>Installed environments</summary><div id="sdk-installed-environments"></div></details>'+'<section id="sdk-package-details" class="record-section" aria-label="SDK packages"></section>'+'</section></details>';
     }else if(selected==='development'){
       html='<section class="panel panel-body"><h2>Technical development snapshot</h2><p>An explicit snapshot pins managed SDK, Contract and Libraries sources. Changed sources make the snapshot stale. Technical builds cannot be published as qualified releases.</p><form id="sdk-development"><label>SDK<select name="sdk_id" required>'+ready.map(item=>'<option value="'+E(item.id)+'">'+E(item.version)+'</option>').join('')+'</select></label><label>Profile<select name="profile" required>'+[...new Set(ready.flatMap(item=>Object.keys(item.profiles)))].map(id=>'<option>'+E(id)+'</option>').join('')+'</select></label>'+['sdk','contract','libraries'].map(role=>'<label>'+E(role)+' repository ID<input name="'+role+'_repository" required placeholder="r4os-'+role+'"></label>').join('')+'<button class="button" type="submit"'+(!ready.length?' disabled':'')+'>Create technical snapshot</button><p class="form-message" role="alert"></p></form></section>';
     }else if(selected==='maintenance'){
@@ -338,6 +369,7 @@
   document.addEventListener('input',event=>{
     const form=event.target.form;
     if(['sdk-import','sdk-setup','sdk-development'].includes(form?.id))form.dataset.toolsDirty='true';
+    if(form?.id==='sdk-setup'){sdkToolDrafts.set(form.elements.sdk_id.value,new FormData(form).getAll('tools'));updateSdkDetails();}
     if(event.target.id==='repository-search'){filter=event.target.value;applyFilter();}
     if(event.target.id==='release-repo-search')document.querySelectorAll('[data-release-search]').forEach(row=>row.hidden=!row.dataset.releaseSearch.includes(event.target.value.toLowerCase()));
     if(event.target.form?.id==='release-edit'){
@@ -362,6 +394,9 @@
     if(event.target.id==='repository-category'){category=event.target.value;applyFilter();}
     if(event.target.id==='repository-account'){account=event.target.value;applyFilter();}
   });
+  document.addEventListener('toggle',event=>{
+    if(event.target.id==='sdk-details'&&event.target.isConnected){sdkDetailsOpen=event.target.open;sdkStored('sdk-details-open',sdkDetailsOpen?'1':'0');}
+  },true);
   document.addEventListener('click',async event=>{
     if(event.target.closest('[data-close-repo-dialog]'))document.querySelector('#detail-dialog')?.close();
     const node=event.target.closest('[data-repo-action]');if(!node)return;
@@ -433,7 +468,10 @@
       try{
         let job;
         if(form.id==='sdk-import')job=await sdk('imports',{method:'POST',body:{release_url:values.get('release_url')}});
-        else if(form.id==='sdk-setup')job=await api('tools/actions/install',{method:'POST',body:{sdk_id:values.get('sdk_id'),tools:values.getAll('tools')}});
+        else if(form.id==='sdk-setup'){
+          sdkToolDrafts.set(values.get('sdk_id'),values.getAll('tools'));
+          job=await api('tools/actions/install',{method:'POST',body:{sdk_id:values.get('sdk_id'),tools:values.getAll('tools')}});
+        }
         else if(form.id==='sdk-development')job=await sdk('development',{method:'POST',body:Object.fromEntries(values)});
         else{await sdk('projects/'+encodeURIComponent(form.dataset.name),{method:'PUT',body:{sdk_id:values.get('sdk_id')||null,libraries:JSON.parse(values.get('libraries')),development_id:values.get('development_id')||null}});U.status('SDK settings saved.');return;}
         await showJob(job.id);

@@ -465,6 +465,15 @@ input:disabled,textarea:disabled { opacity: .5; }
 .sdk-message:not([data-repo-action]) { cursor: default; }
 .sdk-details > summary { color: var(--muted); cursor: pointer; font-size: 12px; }
 .sdk-details > section { margin-top: 18px; }
+.sdk-details-content { min-width: 0; }
+.sdk-details-content > .panel { margin-bottom: 20px; }
+.sdk-tools-options { display: flex; flex-wrap: wrap; gap: 12px; margin-block: 16px; padding: 12px; border: 1px solid var(--line); border-radius: 6px; }
+.sdk-tools-options legend { color: var(--muted); font-size: 12px; padding-inline: 5px; }
+#sdk-tool-setup { margin-top: 20px; }
+.sdk-installed { margin-bottom: 20px; }
+.sdk-installed > summary { color: var(--muted); cursor: pointer; font-size: 12px; }
+.sdk-installed > div { margin-top: 12px; }
+.sdk-installed td { overflow-wrap: anywhere; }
 @container(max-width:650px) {
   .sdk-picker-row { grid-template-columns: 38px minmax(0,1fr); }
   .sdk-action-area { grid-column: 1/-1; width: min(100%,254px); justify-self: end; }

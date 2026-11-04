@@ -211,6 +211,7 @@ def overview(store, *, refresh=False, custom_url=None):
     environments = toolsets.overview(store)['toolsets']
     active = store.setting('active_toolset')
     active_sdk = store.setting('active_sdk')
+    environments.sort(key=lambda environment: environment.get('id') != active)
     for package in packages:
         url = package['release_url']
         records.setdefault(url, {'release_url': url, 'tag': 'v'+package['manifest']['sdk_version'],

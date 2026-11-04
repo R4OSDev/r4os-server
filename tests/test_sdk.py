@@ -91,6 +91,13 @@ class SDKTests(unittest.TestCase):
     def test_sdk_prepared_state_requires_owner_receipt_originals_and_complete_tools(self):
         package=self.prepare_selection();env=toolsets.load(self.store,'test-tools')[1]
         self.assertTrue(sdk_catalog.prepared(self.store,package,env))
+        # Optional tool setup can leave several ready environments for one SDK.
+        other=self.store.root/'BuildTools/Toolsets/a-tools';other.mkdir()
+        (other/'toolset.json').write_text(json.dumps(dict(env,id='a-tools')))
+        (other/'Install').symlink_to(other.parent/'test-tools/Install',target_is_directory=True)
+        self.store.set(sdk_catalog.CACHE_KEY,{'releases':[],'attempted':time.time(),'error':''})
+        selected=sdk_catalog.overview(self.store)['releases'][0]
+        self.assertEqual(selected['state'],'active');self.assertEqual(selected['environment_id'],'test-tools')
         self.assertFalse(sdk_catalog.prepared(self.store,package,dict(env,installed_tools=[])))
         receipt=self.store.root/'BuildTools/Toolsets/test-tools/Install/.SDK-Tools.json'
         value=json.loads(receipt.read_text());value['host']='Windows';receipt.write_text(json.dumps(value))
