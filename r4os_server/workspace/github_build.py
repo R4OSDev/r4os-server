@@ -8,13 +8,14 @@ import re
 import time
 from urllib.parse import quote
 
-from . import build_targets, builds, connections
+from . import artifact_source, build_targets, builds, connections
 from .github_api import Client, GitHubFailure
 from .store import Conflict, identifier, under
 
 CACHE_SECONDS = 600
 MARKER = '<!-- r4os-server-build:'
-PUBLISHED = 'The current version is already published.'
+PUBLISHED = 'The current GitHub revision already has a verified release artifact.'
+_UNSET = object()
 
 
 def initialize(db):
@@ -30,7 +31,8 @@ def build_contract(payload):
 
 def signature(repo, connection, store=None):
     value = {'id': repo['id'], 'owner': repo['owner'], 'repo': repo['display_name'], 'revision': connection['revision'],
-             'commit': repo['local'].get('commit'), 'branch': repo['local'].get('branch'),
+             'available':repo.get('available'), 'private':repo.get('private'), 'listed':repo.get('listed'),
+             'format':2, 'commit': repo['local'].get('commit'), 'remote_commit':repo['local'].get('remote_commit'), 'branch': repo['local'].get('branch'),
              'default_branch': repo.get('default_branch', ''), 'dirty': repo['local'].get('dirty'),
              'targets': [(m['id'], m['version'], m.get('supported'), m.get('manifest')) for m in build_targets.targets(repo)]}
     if store is not None:
@@ -78,7 +80,7 @@ def verify_receipt(client, repo, module, commit, release, contract=None):
         if receipt.get(key) != expected:
             raise Conflict('This release belongs to a different source or target. Increase the manifest version.')
     proof = receipt.get('sdk_profile', {})
-    if (not proof.get('sdk_id') or not proof.get('profile_sources') or receipt.get('technical') is not False
+    if (not isinstance(proof,dict) or not proof.get('sdk_id') or not proof.get('profile_sources') or receipt.get('technical') is not False
             or (contract is not None and build_contract(receipt) != contract)):
         raise Conflict('This release has no matching verified SDK build. Increase the manifest version.')
     files = receipt.get('assets')
@@ -101,12 +103,12 @@ def verify_receipt(client, repo, module, commit, release, contract=None):
     return receipt
 
 
-def inspect_release(client, repo, module, commit, contract=None):
+def inspect_release(client, repo, module, commit, contract=None, *, tagged=_UNSET):
     tag = 'v'+module['version']
-    tagged = client.tag_commit(tag)
-    release = client.request('GET', '/releases/tags/'+quote(tag, safe=''), missing=True)
+    if tagged is _UNSET:tagged = client.tag_commit(tag)
     if tagged is not None and tagged != commit:
         return state('conflict', tag+' is already bound to different source. Increase the manifest version.', tag=tag)
+    release = client.request('GET', '/releases/tags/'+quote(tag, safe=''), missing=True)
     if release is None:
         return state('ready', 'Build and publish '+tag+'.', tag=tag)
     if release.get('tag_name') != tag:
@@ -127,11 +129,20 @@ def persist(store, repo, connection, payload):
     key = signature(repo, connection, store)
     current = store.repository(repo['name'])
     latest = connections.get(store, current['connection_id'])
-    if signature(current, latest, store) != key: return
+    if signature(current, latest, store) != key: return False
     with store.connect() as db:
         db.execute('''INSERT INTO github_release_status VALUES(?,?,?,?) ON CONFLICT(repository_name)
                       DO UPDATE SET signature=excluded.signature,checked_at=excluded.checked_at,payload=excluded.payload''',
                    (repo['name'], key, time.time(), json.dumps(payload)))
+    return True
+
+
+def artifact_summary(items):
+    if not items:return 'not_applicable','No production artifact target exists at the GitHub revision.'
+    if any(item['artifact_state']=='outdated' for item in items):
+        return 'outdated','At least one production target has no current GitHub release artifact.'
+    if all(item['artifact_state']=='current' for item in items):return 'current',PUBLISHED
+    return 'unknown','The GitHub artifact status could not be verified for every target.'
 
 
 def refresh(context, name, *, raise_network_errors=False):
@@ -139,33 +150,52 @@ def refresh(context, name, *, raise_network_errors=False):
     repo = store.require_repository(name)
     connection = connections.get(store, repo['connection_id'])
     modules = build_targets.targets(repo)
-    if not repo['local'].get('commit') or not connection['has_token'] or not modules:
-        return {'targets': []}
-    context.phase('Checking GitHub releases: '+repo['display_name'])
-    client = Client(repo, connections.token(store, repo['connection_id']), context.check)
-    result = {'targets': []}
+    result = {'format':2, 'targets':[], 'artifacts':[], 'artifact_state':'unknown'}
+    network_error = None
+    context.phase('Checking GitHub release artifacts: '+repo['display_name'])
     try:
-        result['remote_commit'] = client.request('GET', '/commits/'+quote(repo['default_branch'], safe=''))['sha']
-        for module in modules:
+        client = Client(repo, connections.token(store, repo['connection_id']), context.check)
+        commit = artifact_source.head(context,repo,client)
+        result['remote_commit'] = commit
+        remote_modules = artifact_source.targets(context,repo,client,commit)
+        for module in remote_modules:
             context.check()
-            if result['remote_commit'] != repo['local']['commit']:
-                item = state('outdated', 'Update the repository to the current default branch before building.')
-            elif not module['version_valid']:
-                item = state('blocked', 'A versioned project manifest is required.')
+            if not module['version_valid']:
+                item = state('blocked',module.get('reason','A versioned manifest is required.'))
             else:
-                pinned = build_targets.pinned(store, repo, module, repo['local']['commit'])
-                if pinned['version'] != module['version']:
-                    item = state('blocked', 'Refresh repository metadata before building.')
-                else:
-                    _, selected = builds.inputs(store, {'name': name, 'target': pinned['id']})
-                    item = inspect_release(client, repo, pinned, repo['local']['commit'], build_contract(selected))
-            result['targets'].append(dict(item, id=module['id'], version=module['version']))
-    except (GitHubFailure, ValueError, KeyError) as error:
-        result['targets'] = [dict(state('unknown', str(error)), id=module['id'], version=module['version']) for module in modules]
-        if raise_network_errors and isinstance(error, GitHubFailure):
-            persist(store, repo, connection, result)
-            raise
-    persist(store, repo, connection, result)
+                contract = None
+                if commit == repo['local'].get('commit') and any(value['id']==module['id'] for value in modules):
+                    try:
+                        _,selected = builds.inputs(store,{'name':name,'target':module['id']})
+                        contract = build_contract(selected)
+                    except (ValueError,KeyError):pass  # Artifact reading does not require installed build tools.
+                if not connection['has_token'] and artifact_source.canonical(repo):
+                    tagged = artifact_source.tag(context,repo,module['version'])
+                    if tagged is None:item=state('ready','No current release artifact is published.',tag='v'+module['version'])
+                    else:item=inspect_release(client,repo,module,commit,contract,tagged=tagged)
+                else:item = inspect_release(client,repo,module,commit,contract)
+            currency = 'current' if item['state']=='published' else 'outdated' if item['state'] in ('ready','conflict') else 'unknown'
+            result['artifacts'].append(dict(item,artifact_state=currency,id=module['id'],version=module['version'],name=module['name'],kind=module['kind']))
+        result['artifact_state'],result['artifact_reason'] = artifact_summary(result['artifacts'])
+        remote = {item['id']:item for item in result['artifacts']}
+        for module in modules:
+            item = remote.get(module['id'],state('blocked','This target is not present in the current GitHub source. Refresh repository metadata.'))
+            if commit != repo['local'].get('commit'):
+                item = state('outdated','The local repository differs from GitHub. Update it before building.')
+            elif item.get('version') != module['version']:
+                item = state('blocked','Refresh repository metadata before building.')
+            result['targets'].append(dict(item,id=module['id'],version=module['version']))
+    except artifact_source.EmptySource as error:
+        result.update(artifact_state='not_applicable',artifact_reason=str(error))
+        result['targets']=[dict(state('blocked',str(error)),id=module['id'],version=module['version']) for module in modules]
+    except (GitHubFailure,OSError,RuntimeError,ValueError,KeyError,TypeError) as error:
+        detail=str(error)
+        result.update(artifact_state='unknown',artifact_reason=detail)
+        result['targets']=[dict(state('unknown',detail),id=module['id'],version=module['version']) for module in modules]
+        if isinstance(error,(GitHubFailure,OSError,RuntimeError)) and not isinstance(error,Conflict):network_error=error
+    if not persist(store,repo,connection,result):
+        raise Conflict('Repository or SDK settings changed during the artifact check. Refresh again.')
+    if raise_network_errors and network_error is not None:raise network_error
     return result
 
 
@@ -177,23 +207,28 @@ def view(store, repo, *, schedule=False, force=False):
     elif not repo['local'].get('commit'): reason = 'Download the repository first.'
     elif repo['local'].get('dirty'): reason = 'Local changes must be committed or removed before building.'
     elif repo['local'].get('branch') != repo.get('default_branch'): reason = 'Use the repository default branch before building.'
+    elif repo['local'].get('status') in ('outdated','ahead','diverged','unknown','conflict','empty'): reason = 'Refresh and update the local repository to match GitHub before building.'
     elif not modules: reason = 'This repository has no supported production build target.'
     elif not connection['has_token']: reason = 'Add a GitHub token with Contents write access to this connection.'
+    elif repo.get('permissions',{}).get('push') is False: reason = 'This connection cannot write GitHub releases for the repository.'
     key = signature(repo, connection, store)
     with store.connect() as db:
         row = db.execute('SELECT * FROM github_release_status WHERE repository_name=?', (repo['name'],)).fetchone()
-        running = db.execute("SELECT id FROM jobs WHERE kind='build_publish' AND subject=? AND status IN ('queued','running') AND cancel=0", (repo['name'],)).fetchone()
-        refreshing = db.execute("SELECT id FROM jobs WHERE kind='refresh' AND subject=? AND status IN ('queued','running')", (repo['name'],)).fetchone()
+        activity=db.execute("SELECT * FROM jobs WHERE subject=? AND kind IN ('build_publish','refresh','github_status') AND status IN ('queued','running') AND (kind='refresh' OR cancel=0)",(repo['name'],)).fetchall()
+    running=next((job for job in activity if job['kind']=='build_publish'),None)
+    refreshing=next((job for job in activity if job['kind']=='refresh'),None)
+    pending=next((job for job in activity if job['kind']=='github_status'),None)
+    checking=bool(refreshing or pending)
     data = json.loads(row['payload']) if row else {}
     complete = {item['id'] for item in data.get('targets', [])} == {item['id'] for item in modules}
-    valid = row is not None and row['signature'] == key and time.time()-row['checked_at'] < CACHE_SECONDS and complete
-    if not reason and (force or not valid) and schedule and not running and not refreshing:
-        with store.connect() as db:
-            pending = db.execute("SELECT id,payload FROM jobs WHERE kind='github_status' AND subject=? AND status IN ('queued','running') AND cancel=0", (repo['name'],)).fetchone()
+    valid = row is not None and data.get('format')==2 and row['signature'] == key and time.time()-row['checked_at'] < CACHE_SECONDS and complete
+    eligible=repo['available'] and bool(modules or data.get('artifacts'))
+    if eligible and (connection['has_token'] or row is not None) and (force or not valid) and schedule and not running and not refreshing:
         if pending and json.loads(pending['payload']).get('signature') != key:
             store.cancel_job(pending['id']);pending = None
         if not pending:
             store.enqueue('github_status', repo['name'], {'signature': key, 'connection_id': repo['connection_id']})
+        checking=True
     cached = {item['id']: item for item in data.get('targets', [])} if valid and not force else {}
     tools_error = ''
     if not reason and modules:
@@ -202,7 +237,8 @@ def view(store, repo, *, schedule=False, force=False):
     result = []
     for module in modules:
         item = cached.get(module['id'], state('checking', 'Checking GitHub release status…'))
-        if reason: item = state('blocked', reason)
+        if item['state']=='published':pass
+        elif reason: item = state('blocked', reason)
         elif not module['version_valid']: item = state('blocked', 'A valid manifest version is required.')
         elif module.get('supported') is False: item = state('blocked', module.get('reason', 'This build target is not supported.'))
         elif item['state'] == 'ready' and tools_error: item = state('blocked', tools_error)
@@ -216,7 +252,13 @@ def view(store, repo, *, schedule=False, force=False):
     elif all(item['state'] == 'published' for item in result): summary = state('published', PUBLISHED)
     elif any(item['enabled'] for item in result): summary = state('ready', 'Build and upload the selected target to GitHub Releases.')
     else: summary = dict(result[0])
+    currency=data.get('artifact_state','unknown') if valid and not force else 'checking' if checking else 'unknown'
+    artifact_reason=data.get('artifact_reason','') if valid and not force else 'Refresh to check GitHub release artifacts.'
+    if not result and currency=='current':summary=state('published',PUBLISHED)
     return dict(summary, targets=result, enabled=any(item['enabled'] for item in result), checking=any(item['state'] == 'checking' for item in result),
+                artifact_state=currency,artifact_reason=artifact_reason,artifacts=data.get('artifacts',[]) if valid else [],
+                remote_commit=data.get('remote_commit') if valid else None,
+                source_current=data['remote_commit']==repo['local'].get('commit') if valid and data.get('remote_commit') else None,
                 job_id=running['id'] if running else None)
 
 
@@ -311,6 +353,9 @@ def run(context, name, payload):
         repo, connection = bound()
         module = build_targets.pinned(store, repo, payload['module'], payload['commit'])
         client = Client(repo, connections.token(store, repo['connection_id']), bound)
+        if artifact_source.head(context,repo,client)!=payload['commit']:
+            with store.connect() as db:db.execute('DELETE FROM github_release_status WHERE repository_name=?',(name,))
+            raise Conflict('GitHub source changed while this build was queued. Refresh and update the repository.')
         tag = 'v'+module['version']
         context.phase('Checking release '+tag)
         before = inspect_release(client, repo, module, payload['commit'], build_contract(payload))
@@ -371,6 +416,9 @@ def run(context, name, payload):
         tagged = client.tag_commit(tag)
         if tagged is not None and tagged != payload['commit']:
             raise Conflict('The release tag changed during upload. Nothing was published.')
+        if artifact_source.head(context,repo,client)!=payload['commit']:
+            with store.connect() as db:db.execute('DELETE FROM github_release_status WHERE repository_name=?',(name,))
+            raise Conflict('GitHub source changed during this build. The release draft was retained; nothing was published.')
         bound()
         final = client.request('PATCH', '/releases/'+str(int(release['id'])), {'draft': False})
         if final.get('draft') is not False: raise GitHubFailure(502, 'GitHub did not confirm release publication.')
@@ -382,5 +430,6 @@ def run(context, name, payload):
         store.change_job(context.job['id'], result=result)
         _, current_inputs = builds.inputs(store, {'name': name, 'target': module['id']})
         if repo['local'].get('commit') == payload['commit'] and build_contract(current_inputs) == build_contract(payload):
-            persist(store, repo, connection, {'remote_commit': payload['commit'], 'targets': [dict(confirmed, id=module['id'], version=module['version'])]})
+            item=dict(confirmed,id=module['id'],version=module['version'],artifact_state='current',name=module['name'],kind=module['kind'])
+            persist(store, repo, connection, {'format':2,'remote_commit': payload['commit'], 'targets':[item], 'artifacts':[item], 'artifact_state':'current','artifact_reason':PUBLISHED})
         return result

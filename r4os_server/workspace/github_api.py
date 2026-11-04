@@ -27,8 +27,9 @@ class Client:
         self.base = '/repos/'+quote(repo['owner'], safe='')+'/'+quote(repo['display_name'], safe='')
 
     def headers(self, accept='application/vnd.github+json'):
-        return {'User-Agent': 'R4OS-Server', 'Accept': accept, 'Authorization': 'Bearer '+self.token,
-                'X-GitHub-Api-Version': '2026-03-10'}
+        headers={'User-Agent': 'R4OS-Server', 'Accept': accept, 'X-GitHub-Api-Version': '2026-03-10'}
+        if self.token:headers['Authorization']='Bearer '+self.token
+        return headers
 
     @staticmethod
     def failure(status):

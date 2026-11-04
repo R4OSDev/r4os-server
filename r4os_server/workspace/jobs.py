@@ -18,12 +18,13 @@ def workspace_job(job):
     area = ('SDK / Tools' if kind.startswith(('sdk_','tools_')) else 'Apps' if kind == 'app_publish'
             else 'Builds' if kind in ('build','build_publish','release') else 'Repositories')
     title = KINDS.get(kind, kind.replace('_',' ').capitalize())
-    target = payload.get('repository_label') or payload.get('release',{}).get('name') or job['subject']
+    release=payload.get('release')
+    target = payload.get('repository_label') or (release.get('name') if isinstance(release,dict) else '') or job['subject']
     return {'key':'workspace:'+job['id'], 'id':job['id'], 'source':'workspace', 'area':area,
             'title':title, 'target':scrub(target or ''), 'status':job['status'],
             'phase':'Cancellation requested' if job['cancel'] else scrub(job['phase']),
             'created':job['created'], 'started':job['started'], 'progress':job['result'].get('progress'),
-            'cancellable':not job['cancel'] and not job['result'].get('activation_committed'),
+            'cancellable':not job['cancel'] and not job['result'].get('activation_committed') and not job['result'].get('github_release',{}).get('published'),
             'log':True, 'details':False}
 
 

@@ -64,6 +64,8 @@ def blob(store, repo, commit, relative):
     mode, kind, object_id = metadata.split()
     if len(entries) != 1 or name != str(path).encode('utf-8') or kind != b'blob' or mode not in (b'100644', b'100755'):
         raise ValueError('The pinned build manifest must be a regular Git file: '+str(path))
+    if int(read('cat-file','-s',object_id.decode('ascii'))) > 1024**2:
+        raise ValueError('The pinned build metadata file is too large: '+str(path))
     try:
         return read('cat-file', 'blob', object_id.decode('ascii')).decode('utf-8-sig')
     except UnicodeError:
@@ -71,10 +73,32 @@ def blob(store, repo, commit, relative):
 
 
 def pinned(store, repo, module, commit):
+    return versioned(module, lambda relative: blob(store, repo, commit, relative))
+
+
+def tree(store, repo, commit):
+    # Reuse exactly the path/ownership/commit validation of pinned blob reads.
+    blob(store,repo,commit,'module.R4MF')
+    root=catalog.repository_path(store,repo)
+    try:
+        result=subprocess.run(['git','--no-replace-objects','-c','safe.directory='+str(root),'-C',str(root),
+                               'ls-tree','-rz','--full-tree',commit],env=clean_env(),capture_output=True,timeout=20)
+    except (OSError,subprocess.TimeoutExpired):raise ValueError('Could not read the Git source tree.') from None
+    if result.returncode or len(result.stdout)>16*1024**2:
+        raise ValueError('Could not read the complete Git source tree: '+scrub(result.stderr.decode('utf-8','replace'))[:800])
+    entries=[]
+    for raw in result.stdout.rstrip(b'\0').split(b'\0'):
+        if not raw:continue
+        metadata,path=raw.split(b'\t',1);mode,kind,sha=metadata.decode().split()
+        entries.append({'path':path.decode('utf-8'),'mode':mode,'type':kind,'sha':sha})
+    return entries
+
+
+def versioned(module, read):
     """Never use a stale UI version to choose the immutable release tag."""
     item = dict(module)
     if item.get('manifest'):
-        text = blob(store, repo, commit, item['manifest'])
+        text = read(item['manifest'])
         if text is None:
             raise ValueError('The pinned build manifest is missing from the selected source commit: '+item['manifest'])
         fields = {}
@@ -89,8 +113,8 @@ def pinned(store, repo, module, commit):
         version = versions[0] if len(versions) == 1 else ''
         source = item['manifest']
     else:
-        zone = blob(store, repo, commit, 'build.zig.zon')
-        cargo = blob(store, repo, commit, 'Cargo.toml')
+        zone = read('build.zig.zon')
+        cargo = read('Cargo.toml')
         match = re.search(r'\.version\s*=\s*"([^"]+)"', zone or '')
         cargo_version = tomllib.loads(cargo or '').get('package', {}).get('version', '')
         use_cargo = bool(cargo_version) and (item.get('language') == 'Rust' or not match)

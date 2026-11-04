@@ -1,5 +1,6 @@
 """Real Git source pins and simulated GitHub mutations; no production releases."""
 from concurrent.futures import ThreadPoolExecutor
+import base64
 import hashlib
 import io
 import json
@@ -29,6 +30,16 @@ class FakeGitHub:
     def request(self,method,path,body=None,**options):
         self.check();self.calls.append((method,path,body))
         if path.startswith('/commits/'):return {'sha':self.commit}
+        if path.startswith('/git/trees/'):
+            commit=path.split('/')[-1].split('?')[0]
+            raw=subprocess.check_output(['git','-C',str(self.source),'ls-tree','-rz',commit]);entries=[]
+            for item in raw.rstrip(b'\0').split(b'\0'):
+                if not item:continue
+                meta,name=item.split(b'\t',1);mode,kind,sha=meta.decode().split();entries.append({'path':name.decode(),'mode':mode,'type':kind,'sha':sha})
+            return {'truncated':False,'tree':entries}
+        if path.startswith('/git/blobs/'):
+            raw=subprocess.check_output(['git','-C',str(self.source),'cat-file','blob',path.rsplit('/',1)[-1]])
+            return {'encoding':'base64','content':base64.b64encode(raw).decode(),'size':len(raw)}
         if path.startswith('/releases/tags/'):
             tag=path.split('/')[-1]
             return self.releases.get(tag)
@@ -81,9 +92,17 @@ class GitHubBuildTests(unittest.TestCase):
         from sdk_fixture import install
         self.proof=install(self.store)
         self.fake=FakeGitHub(self.commit);self.build_count=0
+        self.fake.source=self.source
         self.addCleanup(patch.stopall)
         patch.object(github_build,'Client',side_effect=self.fake.factory).start()
         patch.object(builds,'build',side_effect=self.fake_build).start()
+        def remote(context,repo,*args,**options):
+            if '--tags' not in args:return self.fake.commit+'\trefs/heads/main\n',0
+            values=[]
+            for tag,commit in self.fake.tags.items():
+                if 'refs/tags/'+tag in args:values.append(commit+'\trefs/tags/'+tag)
+            return '\n'.join(values),0 if values else 2
+        patch.object(Context,'repository_git',autospec=True,side_effect=remote).start()
 
     def git(self,*args):
         return subprocess.run(['git','-C',str(self.source),*args],check=True,capture_output=True,text=True).stdout.strip()
@@ -185,9 +204,69 @@ class GitHubBuildTests(unittest.TestCase):
         self.assertFalse(current['enabled']);self.assertIn('Increase',current['reason'])
         with self.store.connect() as db:
             self.assertEqual(db.execute('SELECT payload FROM github_release_status WHERE repository_name=?',('other',)).fetchone()[0],'{"keep":true}')
-        retry=self.store.enqueue('refresh','unusual-project');context=Context(self.store,retry)
+        retry=self.store.enqueue('refresh','unusual-project');context=Context(self.store,retry);self.fake.tags.clear()
         with patch.object(catalog,'public_json',return_value=(item,{})),patch.object(catalog,'inspect',return_value=self.local),patch.object(self.fake,'request',side_effect=GitHubFailure(503,'Release endpoint down')):
             with self.assertRaisesRegex(GitHubFailure,'Release endpoint down'):worker.execute(context)
+
+    def test_artifact_currency_uses_remote_manifest_while_checkout_is_older(self):
+        self.publish()
+        path=self.source/'module.R4MF';path.write_text(path.read_text().replace('0.1.0','0.2.0'))
+        self.git('add','.');self.git('commit','-m','Version 0.2.0');remote=self.git('rev-parse','HEAD')
+        self.fake.commit=remote
+        self.store.local('unusual-project',dict(self.local,commit=remote,modules=[dict(self.module,version='0.2.0')]))
+        self.publish()
+        self.git('reset','--hard',self.commit)
+        self.store.local('unusual-project',dict(self.local,status='outdated',remote_commit=remote))
+        current=self.warm();self.assertFalse(current['enabled']);self.assertEqual(current['artifact_state'],'current')
+        self.assertEqual(current['artifacts'][0]['version'],'0.2.0');self.assertFalse(current['source_current'])
+        self.assertEqual(self.git('rev-parse','HEAD'),self.commit);self.assertIn('0.1.0',path.read_text())
+        del self.fake.releases['v0.2.0']
+        current=self.warm();self.assertEqual(current['artifact_state'],'outdated');self.assertFalse(current['enabled'])
+
+    def test_public_artifact_can_be_verified_without_checkout_or_active_sdk(self):
+        self.publish();origin=self.root/'remote-source';self.source.rename(origin);self.fake.source=origin
+        self.store.local('unusual-project',{'status':'missing'})
+        self.store.set('active_sdk',None);self.store.set('active_toolset',None)
+        conn=connections.get(self.store,'main');connections.save(self.store,{'url':conn['url'],'revision':conn['revision'],'remove_token':True},'main')
+        current=self.warm();self.assertEqual(current['artifact_state'],'current');self.assertFalse(current['enabled'])
+        self.assertNotIn('Authorization',Client(self.store.repository('unusual-project'),'').headers())
+        self.assertFalse(self.source.exists());self.assertEqual(self.fake.credentials[-1][1],'')
+        del self.fake.releases['v0.1.0'];current=self.warm()
+        self.assertEqual(current['artifact_state'],'outdated');self.assertFalse(current['enabled'])
+        request=self.fake.request
+        def truncated(method,path,*args,**options):
+            return {'truncated':True,'tree':[]} if path.startswith('/git/trees/') else request(method,path,*args,**options)
+        with patch.object(self.fake,'request',side_effect=truncated):current=self.warm()
+        self.assertEqual(current['artifact_state'],'unknown');self.assertFalse(self.source.exists())
+
+    def test_artifact_missing_and_unknown_are_separate_from_sdk_readiness(self):
+        with self.store.connect() as db:
+            original=db.execute("SELECT metadata FROM repositories WHERE name='unusual-project'").fetchone()[0]
+            metadata=json.loads(original);metadata['permissions']={'push':False}
+            db.execute("UPDATE repositories SET metadata=? WHERE name='unusual-project'",(json.dumps(metadata),))
+        current=self.warm();self.assertEqual(current['artifact_state'],'outdated');self.assertFalse(current['enabled']);self.assertIn('cannot write',current['reason'])
+        with self.store.connect() as db:db.execute("UPDATE repositories SET metadata=? WHERE name='unusual-project'",(original,))
+        self.store.set('active_sdk',None);self.store.set('active_toolset',None)
+        current=self.warm();self.assertEqual(current['artifact_state'],'outdated');self.assertFalse(current['enabled'])
+        with patch.object(self.fake,'request',side_effect=GitHubFailure(503,'Fixture unavailable')):current=self.warm()
+        self.assertEqual(current['artifact_state'],'unknown');self.assertFalse(current['enabled'])
+        github_build.view(self.store,self.store.repository('unusual-project'),schedule=True)
+        self.assertEqual(self.store.active_jobs(),[])
+        from r4os_server.workspace import artifact_source
+        with patch.object(artifact_source,'head',side_effect=artifact_source.EmptySource('Empty GitHub source')):current=self.warm()
+        self.assertEqual(current['artifact_state'],'not_applicable');self.assertFalse(current['enabled'])
+
+    def test_multiple_targets_expose_missing_artifact_and_only_buildable_target(self):
+        root=self.source/'module.R4MF';root.write_text(root.read_text().replace('0.1.0','0.2.0'))
+        second=self.source/'Second/module.R4MF';second.parent.mkdir();second.write_text(root.read_text().replace('NAME=GAME','NAME=GAME2').replace('0.2.0','0.3.0'))
+        self.git('add','.');self.git('commit','-m','Two production targets');commit=self.git('rev-parse','HEAD');self.fake.commit=commit
+        self.store.local('unusual-project',dict(self.local,commit=commit,modules=[dict(self.module,version='0.2.0'),dict(self.module,id='GAME2',name='GAME2',version='0.3.0',manifest='Second/module.R4MF')]))
+        self.publish();current=self.warm()
+        self.assertEqual(current['artifact_state'],'outdated');self.assertTrue(current['enabled'])
+        targets={item['id']:item for item in current['targets']}
+        self.assertFalse(targets['GAME']['enabled']);self.assertTrue(targets['GAME2']['enabled'])
+        job=github_build.enqueue(self.store,{'name':'unusual-project','target':'GAME2'})
+        self.assertEqual(job['payload']['module']['version'],'0.3.0')
 
     def test_existing_tag_with_different_source_is_never_changed(self):
         self.fake.tags['v0.1.0']='a'*40
@@ -241,7 +320,7 @@ class GitHubBuildTests(unittest.TestCase):
         self.assertFalse(release['draft'])
 
     def test_source_and_connection_changes_invalidate_status_and_reject_stale_jobs(self):
-        self.publish();self.fake.commit='f'*40
+        self.publish();(self.source/'later.txt').write_text('Later remote source');self.git('add','.');self.git('commit','-m','Remote source advanced');self.fake.commit=self.git('rev-parse','HEAD')
         self.assertEqual(self.warm()['state'],'outdated')
         self.fake.commit=self.commit;self.warm()
         conn=connections.get(self.store,'main')
@@ -257,18 +336,19 @@ class GitHubBuildTests(unittest.TestCase):
         self.store.change_job(jobs[0]['id'],status='running',result={'github_release':{'published':True}})
         self.store.recover();self.assertEqual(self.store.job(jobs[0]['id'])['status'],'completed')
 
-    def test_pinned_older_build_cannot_mark_a_new_checkout_as_published(self):
+    def test_queued_older_source_is_rejected_before_publishing(self):
         self.warm();job=self.enqueue()
         (self.source/'new-source.txt').write_text('A later local checkout.')
         self.git('add','.');self.git('commit','-m','New checkout after enqueue')
         latest=self.git('rev-parse','HEAD')
         self.store.local('unusual-project',dict(self.local,commit=latest));self.fake.commit=latest
         worker.once(self.store)
-        finished=self.store.job(job['id']);self.assertEqual(finished['status'],'completed',finished['error'])
-        self.assertEqual(self.fake.tags['v0.1.0'],self.commit)
+        finished=self.store.job(job['id']);self.assertEqual(finished['status'],'failed')
+        self.assertIn('GitHub source changed',finished['error']);self.assertNotIn('v0.1.0',self.fake.tags)
+        self.assertEqual(self.build_count,0)
         info=github_build.view(self.store,self.store.repository('unusual-project'))
         self.assertNotEqual(info['state'],'published');self.assertFalse(info['enabled'])
-        self.assertEqual(self.warm()['state'],'conflict')
+        self.assertEqual(self.warm()['state'],'ready')
 
     def test_unknown_github_status_and_dirty_source_never_enable_build(self):
         with patch.object(self.fake,'request',side_effect=GitHubFailure(403,'Denied')):

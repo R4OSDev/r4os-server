@@ -67,6 +67,10 @@ a:focus-visible {
 .repository-entry p { margin: 6px 0 10px; }
 .repository-local p { color: var(--muted); font-size: 11px; }
 .repository-local[data-local-status="current"] > .badge { color: #b2dbc0; background: #243b2d; }
+.repository-local[data-local-status] > .badge.artifact-outdated { color: #e2c185; background: #3d3220; margin-left: 6px; }
+.build-action { display: inline-flex; }
+.build-action .button:disabled { pointer-events: none; }
+.build-action:focus-visible { outline: 2px solid #9cbea7; outline-offset: 3px; border-radius: 6px; }
 .repository-local:is([data-local-status="outdated"],[data-local-status="modified"],[data-local-status="diverged"],[data-local-status="ahead"],[data-local-status="conflict"]) > .badge { color: #e2c185; background: #3d3220; }
 .repository-labels { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .repository-publish { display: inline-flex; align-items: center; gap: 7px; align-self: center; padding: 8px 0; cursor: pointer; }

@@ -252,6 +252,8 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(target.read_text(),'two\n');self.assertEqual(context.git(checkout,'rev-parse','HEAD')[0].strip(),head)
 
     def test_single_refresh_scopes_public_private_metadata_and_release_cache(self):
+        from r4os_server.workspace import github_build
+        checker=patch.object(github_build,'refresh',return_value={'targets':[]});checker.start();self.addCleanup(checker.stop)
         self.seed('same')
         other=connections.save(self.store,{'url':'https://github.com/OtherOwner','token':'fixture-private-token'})
         name=other['id']+'.22'
