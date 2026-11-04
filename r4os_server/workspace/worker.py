@@ -18,6 +18,9 @@ def execute(context):
     kind, subject, payload = job["kind"], job["subject"], job["payload"]
     if kind.startswith('sdk_'):
         from . import sdk_packages
+        if kind == 'sdk_catalog':
+            from .sdk_catalog import refresh_job
+            return refresh_job(context, payload)
         if kind == 'sdk_select':
             from .sdk_install import select
             return select(context, payload)

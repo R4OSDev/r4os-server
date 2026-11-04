@@ -172,7 +172,7 @@
     main.disabled=state==='active'||!item?.supported||busy||sdkSending;
     main.title=state==='active'?'This SDK is active.':item?.reason||'Prepare and activate this SDK.';
     document.querySelector('[data-repo-action="sdk_custom"]').disabled=!!running||sdkSending;
-    document.querySelector('[data-repo-action="sdk_refresh"]').disabled=sdkSending;
+    document.querySelector('[data-repo-action="sdk_refresh"]').disabled=sdkSending||!!sdkData?.catalog?.refreshing;
     const ring=document.querySelector('#sdk-progress'),progress=relevant?.result?.progress||{};
     ring.hidden=!busy&&!sdkSending;
     const percent=Number.isFinite(progress.percent)?Math.max(0,Math.min(100,progress.percent)):null;
@@ -182,14 +182,15 @@
     ring.setAttribute('aria-valuemin','0');ring.setAttribute('aria-valuemax','100');
     if(percent!==null)ring.setAttribute('aria-valuenow',String(Math.round(percent)));else ring.removeAttribute('aria-valuenow');
     ring.title=progress.scope?(progress.scope+(percent!==null?' · '+Math.round(percent)+'%':' progress unavailable')):'Preparing SDK';
-    let message=sdkSending?'Starting SDK preparation…':sdkError||(!item?.supported?item?.reason:'')||relevant?.error||sdkData?.catalog?.error||progress.message||(busy?'Waiting for the build worker…':'')||'';
+    let message=sdkSending?'Starting SDK preparation…':sdkError||(!item?.supported?item?.reason:'')||relevant?.error||(sdkData?.catalog?.refreshing&&!busy?'Refreshing SDK releases…':'')||sdkData?.catalog?.error||progress.message||(busy?'Waiting for the build worker…':'')||'';
     if(relevant?.status==='cancelled')message='SDK preparation cancelled. The previous SDK remains active.';
     if(relevant?.status==='interrupted')message='SDK preparation was interrupted. Select the action to retry.';
     message=String(message).replace(/\s+/g,' ').trim();
     const node=document.querySelector('#sdk-message');if(node.textContent!==message)node.textContent=message;
-    node.title=message+(relevant?' · Open full job log':'');
+    const messageJob=sdkData?.catalog?.refreshing&&!busy?sdkData.catalog.job_id:relevant?.id;
+    node.title=message+(messageJob?' · Open full job log':'');
     node.classList.toggle('is-error',!!(sdkError||relevant?.error||!item?.supported||sdkData?.catalog?.error));
-    if(relevant){node.dataset.repoAction='job';node.dataset.name=relevant.id;}
+    if(messageJob){node.dataset.repoAction='job';node.dataset.name=messageJob;}
     else{delete node.dataset.repoAction;delete node.dataset.name;}
     main.setAttribute('aria-busy',String(busy||sdkSending));
   }
@@ -201,7 +202,7 @@
   }
   function pollSdk(ctx){
     clearTimeout(U.poll);
-    if(!sdkData?.job||!active(sdkData.job))return;
+    if(!sdkData?.catalog?.refreshing&&(!sdkData?.job||!active(sdkData.job)))return;
     U.poll=setTimeout(async()=>{
       if(ctx.generation!==U.generation)return;
       if(!document.querySelector('#detail-dialog[open]')){

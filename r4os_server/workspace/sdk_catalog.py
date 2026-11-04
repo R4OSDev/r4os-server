@@ -1,6 +1,7 @@
 """Official SDK releases and their local, host-specific preparation state."""
 from functools import lru_cache
 import json
+import hashlib
 from pathlib import Path
 import platform
 import re
@@ -50,7 +51,6 @@ def _manifest(url):
     manifest = sdk_packages.strict_json(raw)
     sdk_packages.validate_manifest(manifest, version)
     required_tools({'manifest': manifest})
-    import hashlib
     return hashlib.sha256(raw).hexdigest()
 
 
@@ -183,8 +183,29 @@ def custom_release(store, url, refresh=False):
     return dict(record)
 
 
+def refresh_job(context, value):
+    """GitHub egress belongs to the worker, never the LAN-only WebApp."""
+    url = value.get('release_url')
+    if url:
+        context.phase('Loading the custom SDK release')
+        record = custom_release(context.store, url, refresh=True)
+        if not record['supported']:
+            raise ValueError(record['reason'])
+        return {'release_url':url, 'supported':True}
+    context.phase('Refreshing the official SDK release catalogue')
+    cache = remote_catalog(context.store, refresh=True)
+    if cache.get('error'):
+        raise RuntimeError(cache['error'])
+    return {'updated':cache['updated'], 'release_count':len(cache['releases'])}
+
+
 def overview(store, *, refresh=False, custom_url=None):
-    cache = remote_catalog(store, refresh=refresh)
+    cache = store.setting(CACHE_KEY, {})
+    catalogue_job = None
+    if refresh or time.time()-cache.get('attempted', 0) >= (60 if cache.get('error') else 300):
+        catalogue_job = store.enqueue('sdk_catalog', 'sdk', {})
+    else:
+        catalogue_job = next((job for job in store.jobs('sdk') if job['kind'] == 'sdk_catalog' and job['status'] in ('queued','running')), None)
     records = {item['release_url']: dict(item) for item in cache.get('releases', [])}
     packages = sdk_packages.packages(store)
     environments = toolsets.overview(store)['toolsets']
@@ -196,7 +217,18 @@ def overview(store, *, refresh=False, custom_url=None):
                                 'version': package['manifest']['sdk_version'], 'supported': True,
                                 'reason': '', 'custom': True, 'prerelease': False})
     if custom_url and custom_url not in records:
-        records[custom_url] = custom_release(store, custom_url, refresh)
+        _, version = sdk_packages.release_base(custom_url)
+        custom = store.setting('sdk-custom-releases', {}).get(custom_url, {})
+        pending = None
+        subject = 'sdk-custom-'+hashlib.sha256(custom_url.encode()).hexdigest()[:16]
+        if refresh or time.time()-custom.get('attempted', 0) >= (60 if custom.get('failed') else 300):
+            pending = store.enqueue('sdk_catalog', subject, {'release_url':custom_url})
+        else:
+            pending = next((job for job in store.jobs(subject) if job['status'] in ('queued','running')), None)
+        records[custom_url] = dict(custom.get('record') or {'release_url':custom_url, 'tag':'v'+version,
+                                  'version':version, 'custom':True, 'supported':False, 'reason':'Loading the custom SDK release…'})
+        if pending:
+            catalogue_job = pending
     for url, record in records.items():
         package = next((p for p in packages if p['release_url'] == url), None)
         ready = next((env for env in environments if package and env.get('sdk_id') == package['id'] and prepared(store, package, env)), None)
@@ -209,6 +241,7 @@ def overview(store, *, refresh=False, custom_url=None):
     jobs = store.jobs('sdk', limit=100)
     running = next((job for job in jobs if job['kind'] == 'sdk_select' and job['status'] in ('queued', 'running')), None)
     return {'releases': sorted(records.values(), key=sort_key, reverse=True),
-            'catalog': {key: cache.get(key) for key in ('updated', 'stale', 'error')},
+            'catalog': dict({key:cache.get(key) for key in ('updated', 'stale', 'error')},
+                            refreshing=bool(catalogue_job), job_id=catalogue_job['id'] if catalogue_job else None),
             'active_sdk': active_sdk, 'active_url': next((p['release_url'] for p in packages if p['id'] == active_sdk), None),
             'job': running or next((job for job in jobs if job['kind'] == 'sdk_select'), None)}

@@ -52,7 +52,8 @@ class SDKTests(unittest.TestCase):
         draft=dict(release('9.9.9',999),draft=True)
         old=dict(release('0.63.9',6309),assets=[])
         with patch.object(sdk_catalog.catalog,'public_json',side_effect=[(first,{'Link':'<next>; rel="next"'}),([release('0.64.146',146),draft,old],{})]) as request,patch.object(sdk_catalog,'_manifest',return_value='1'*64):
-            value=sdk_catalog.overview(self.store,refresh=True)
+            sdk_catalog.remote_catalog(self.store,refresh=True)
+            value=sdk_catalog.overview(self.store)
         self.assertEqual(request.call_count,2)
         self.assertEqual([r['version'] for r in value['releases'][:3]],['0.64.146','0.64.145','0.64.99'])
         self.assertEqual(len(value['releases']),102)
@@ -62,11 +63,13 @@ class SDKTests(unittest.TestCase):
             self.assertEqual(sdk_catalog.overview(self.store)['releases'][1]['state'],'active')
         custom='https://github.com/R4OSDev/r4os-sdk/releases/tag/v0.64.148'
         with patch.object(sdk_catalog.catalog,'public_json',return_value=(release('0.64.148',148),{})) as request,patch.object(sdk_catalog,'_manifest',return_value='1'*64):
+            sdk_catalog.custom_release(self.store,custom)
             self.assertTrue(sdk_catalog.overview(self.store,custom_url=custom)['releases'][0]['custom'])
             self.assertTrue(sdk_catalog.overview(self.store,custom_url=custom)['releases'][0]['custom'])
             self.assertEqual(request.call_count,1)
         with patch.object(sdk_catalog.catalog,'public_json',side_effect=RuntimeError('unavailable')):
-            offline=sdk_catalog.overview(self.store,refresh=True)
+            sdk_catalog.remote_catalog(self.store,refresh=True)
+            offline=sdk_catalog.overview(self.store)
         self.assertTrue(offline['catalog']['stale']);self.assertTrue(offline['catalog']['error'])
         self.assertEqual(offline['catalog']['updated'],value['catalog']['updated'])
         self.assertEqual(offline['releases'][1]['state'],'active')
@@ -74,6 +77,16 @@ class SDKTests(unittest.TestCase):
         self.assertEqual(sdk_catalog.overview(self.store)['releases'][1]['state'],'installed')
         executable=self.store.root/'BuildTools/Toolsets/test-tools/Install/Toolchains/Zig/zig';executable.unlink()
         self.assertEqual(sdk_catalog.overview(self.store)['releases'][1]['state'],'download')
+
+        # HTTP-side reads schedule work; they must never perform Internet I/O.
+        with patch.object(sdk_catalog.catalog,'public_json',side_effect=AssertionError('WebApp attempted Internet access')):
+            pending=sdk_catalog.overview(self.store,refresh=True)
+            repeated=sdk_catalog.overview(self.store,refresh=True)
+        self.assertTrue(pending['catalog']['refreshing'])
+        self.assertEqual(pending['catalog']['job_id'],repeated['catalog']['job_id'])
+        context=Context(self.store,self.store.job(pending['catalog']['job_id']))
+        with patch.object(sdk_catalog.catalog,'public_json',return_value=([release('0.64.146',146)],{})),patch.object(sdk_catalog,'_manifest',return_value='1'*64):
+            self.assertEqual(worker.execute(context)['release_count'],1)
 
     def test_sdk_prepared_state_requires_owner_receipt_originals_and_complete_tools(self):
         package=self.prepare_selection();env=toolsets.load(self.store,'test-tools')[1]
