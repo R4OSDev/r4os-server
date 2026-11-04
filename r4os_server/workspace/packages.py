@@ -77,6 +77,7 @@ def metadata(module):
         match=re.fullmatch(r'([A-Za-z0-9_-]+):([A-Za-z0-9_]+):([0-9]{1,10})',raw)
         if not match:dependencies=None;break
         dependencies.append({'module_id':match[1],'symbol':match[2],'abi_version':int(match[3]),'package_id':None})
+    if package_type=='kernel':dependencies=None
     exports=[]
     for raw in module.get('exports') or []:
         match=re.fullmatch(r'([A-Za-z0-9_]+):([A-Za-z0-9_]+):([0-9]{1,10})',raw)
@@ -86,7 +87,7 @@ def metadata(module):
             'format':module['kind'],'artifact_name':('r4os.elf' if package_type=='kernel' else module['id']+'.'+module['kind']),
             'manifest':module.get('manifest'), 'installation':installation,
             'compatibility':{'architecture':None,'abi':None,'os_version':None,'sdk_profile':None},
-            'runtime_dependencies':dependencies, 'declared_imports':list(module.get('imports') or []),
+            'runtime_dependencies':dependencies, 'declared_imports':None if package_type=='kernel' else list(module.get('imports') or []),
             'provides':{'module_id':module['id'],'exports':exports} if package_type=='library' else None}
 
 

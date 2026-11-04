@@ -2,8 +2,9 @@
 from pathlib import Path
 import hashlib
 import json
+import re
 import sqlite3
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, unquote
 
 from ..common.access import AccessPolicy
 from ..common.http import Handler as BaseHandler, HTTPError, LANHTTPServer, configure_server
@@ -33,11 +34,15 @@ class Handler(BaseHandler):
                 self.end_headers();self.close_connection=True
                 if self.command!='HEAD' and not matched:self.wfile.write(body)
                 return
-            if path.startswith('/api/v1/packages/'):
-                raise HTTPError(503, 'catalog_not_ready', 'The software catalogue is not available yet.')
+            match=re.fullmatch(r'/api/v1/packages/([^/]+)/files/([1-9][0-9]{0,19})',path)
+            if match:
+                from .files import send
+                return send(self,unquote(match[1]),match[2])
             raise HTTPError(404, 'not_found')
         except HTTPError as error:
             self.json(error.status, error.body)
+        except (BrokenPipeError,ConnectionResetError):
+            return
         except (sqlite3.Error, OSError):
             self.json(503, {'error':'storage_unavailable'})
         except (ValueError,KeyError,TypeError):

@@ -124,6 +124,54 @@ class ServiceTests(unittest.TestCase):
         binary.unlink();outside=case.root/'outside';outside.write_bytes(original);binary.symlink_to(outside)
         self.assertEqual(len(self.request('GET','/api/v1/packages',server=server)[1]['unavailable']),1)
 
+    def test_software_file_types_ranges_conditionals_and_open_descriptor_removal(self):
+        from r4os_server.workspace import app_storage
+        server,case,_=self.software_fixture()
+        values=self.request('GET','/api/v1/packages',server=server)[1]['packages']
+        for package in values:
+            artifact=next(a for a in package['assets'] if a['role']=='artifact');url=artifact['download_url']
+            status,raw,headers=self.request('GET',url,server=server)
+            self.assertEqual(status,200);self.assertEqual(len(raw),artifact['size_bytes'])
+            self.assertEqual(hashlib.sha256(raw).hexdigest(),artifact['sha256'])
+            self.assertEqual(headers['X-Checksum-SHA256'],artifact['sha256'])
+            for value,expected in [('bytes=0-0',raw[:1]),('bytes=1-',raw[1:]),('bytes=-7',raw[-7:]),('bytes=0-999999',raw)]:
+                status,body,partial=self.request('GET',url,headers={'Range':value,'If-Range':headers['ETag']},server=server)
+                self.assertEqual((status,body),(206,expected));self.assertEqual(int(partial['Content-Length']),len(expected))
+            for value in ('bytes=999999-','bytes=-0','bytes=0-0,2-3'):
+                status,body,partial=self.request('GET',url,headers={'Range':value},server=server)
+                self.assertEqual(status,416);self.assertEqual(partial['Content-Range'],'bytes */'+str(len(raw)))
+            self.assertEqual(self.request('GET',url,headers={'Range':'bytes=1-','If-Range':'"different"'},server=server)[:2],(200,raw))
+            self.assertEqual(self.request('GET',url,headers={'If-None-Match':headers['ETag']},server=server)[:2],(304,b''))
+            status,body,head=self.request('HEAD',url,headers={'Range':'bytes=1-'},server=server)
+            self.assertEqual((status,body),(200,b''));self.assertEqual(int(head['Content-Length']),len(raw))
+        application=next(p for p in values if p['package_type']=='application')
+        url=next(a['download_url'] for a in application['assets'] if a['role']=='artifact')
+        original=server.catalog.open_asset
+        def remove_after_open(row,asset):
+            stream=original(row,asset);app_storage.remove(case.store,{'minesweeper'});return stream
+        with patch.object(server.catalog,'open_asset',side_effect=remove_after_open):
+            status,raw,_=self.request('GET',url,server=server)
+        self.assertEqual(status,200)
+        self.assertEqual(self.request('GET',url,server=server)[0],404)
+        self.assertEqual(self.request('GET','/api/v1/packages/gh-1-..%2Fetc/files/1',server=server)[0],404)
+
+    def test_software_downloads_keep_release_urls_and_recheck_publication_and_bans(self):
+        from r4os_server.workspace import apps
+        server,case,fake=self.software_fixture()
+        item=next(p for p in self.request('GET','/api/v1/packages',server=server)[1]['packages'] if p['package_type']=='application')
+        old=next(a for a in item['assets'] if a['role']=='artifact')
+        old_body=self.request('GET',old['download_url'],server=server)[1]
+        fake.set_release('0.2.0',12);case.refresh_release();case.download_release('update')
+        current=next(p for p in self.request('GET','/api/v1/packages',server=server)[1]['packages'] if p['package_type']=='application')
+        new=next(a for a in current['assets'] if a['role']=='artifact')
+        self.assertNotEqual(new['download_url'],old['download_url'])
+        self.assertEqual(self.request('GET',old['download_url'],server=server)[1],old_body)
+        apps.publish(case.store,'minesweeper',{'published':False})
+        self.assertEqual(self.request('GET',old['download_url'],server=server)[0],404)
+        self.assertEqual(self.request('GET',new['download_url'],server=server)[0],404)
+        server.policy.store.block_ip('127.0.0.1','fixture',60)
+        self.assertEqual(self.request('GET',old['download_url'],headers={'If-None-Match':'"'+old['sha256']+'"'},server=server)[0],403)
+
     def test_software_uses_shared_registration_revocation_ban_and_rate_limit(self):
         from r4os_server.software.service import create_server
         software=self.start(create_server(replace(self.config,software_port=0)))
@@ -205,17 +253,21 @@ class ServiceTests(unittest.TestCase):
         from r4os_server.registration.service import create_public_server as public_registration
         from r4os_server.updates.service import create_public_server as public_updates
         from r4os_server.benchmarks.service import create_server as benchmarks, create_public_server as public_benchmarks
+        from r4os_server.software.service import create_server as software_server,create_public_server as public_software
+        from r4os_server.workspace.store import Store
         folder=Path(self.temp.name)
         certificate,key=folder/'cert.pem',folder/'key.pem'
         subprocess.run(['openssl','req','-x509','-newkey','rsa:2048','-nodes','-days','1',
                         '-subj','/CN=isolated-test','-addext','subjectAltName=IP:127.0.0.1,IP:127.0.0.2',
                         '-out',str(certificate),'-keyout',str(key)],capture_output=True,check=True)
-        config=replace(self.config,public_api_host='127.0.0.2',benchmarks_port=0,
+        Store(folder/'workspace')
+        config=replace(self.config,public_api_host='127.0.0.2',benchmarks_port=0,software_port=0,workspace_dir=str(folder/'workspace'),
                        tls_cert=str(certificate),tls_key=str(key),tls_ca=str(certificate))
         registration=self.start(public_registration(config,self.registration))
         updates=self.start(public_updates(config,self.updates))
         private_benchmarks=self.start(benchmarks(config))
         benchmark=self.start(public_benchmarks(config,private_benchmarks))
+        private_software=self.start(software_server(config));software=self.start(public_software(config,private_software))
         context=ssl.create_default_context(cafile=str(certificate))
         def request(server,path,method='GET',body=None,token=None,hostname='127.0.0.2'):
             client=HTTPSConnection(hostname,server.server_port,context=context,timeout=3,
@@ -231,12 +283,16 @@ class ServiceTests(unittest.TestCase):
         from test_benchmarks import CLAIM_ID, claim_document
         claim_route='/api/v1/hosts/'+CLAIM_ID+'/claim'
         self.assertEqual(request(updates,'/catalog.json')[0],401)
+        self.assertEqual(request(software,'/api/v1/packages')[0],401)
         self.assertEqual(request(benchmark,claim_route,'POST',claim_document(),config.benchmark_token)[0],401)
         with socket.create_connection(registration.server_address,source_address=('127.0.0.3',0),timeout=3) as raw:
             with context.wrap_socket(raw,server_hostname='127.0.0.2') as client:
                 client.sendall(config.registration_secret.encode())
                 self.assertEqual(client.recv(2),b'OK')
         self.assertEqual(request(updates,'/catalog.json')[0],200)
+        self.assertEqual(request(software,'/api/v1/packages')[0],200)
+        self.assertEqual(request(private_software,'/api/v1/packages',hostname='127.0.0.1')[0],200)
+        self.assertEqual(request(software,'/api/v1/packages','POST',{})[0],405)
         allowed={item['ip'] for item in self.registration.store.list_allowed()}
         self.assertIn('127.0.0.3',allowed)
         self.assertNotIn('198.51.100.12',allowed)

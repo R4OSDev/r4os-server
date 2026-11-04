@@ -11,7 +11,7 @@ KINDS = {'refresh':'Repository refresh', 'catalog':'Catalogue refresh', 'refresh
          'update_all':'Update repositories', 'check':'Check repository', 'github_status':'Artifact check',
          'build':'Build', 'build_publish':'Build and publish', 'release':'Build release',
          'app_publish':'Show in Apps', 'connection_delete':'Remove connection',
-         'app_refresh':'App refresh','app_download':'Download app','app_update':'Update app','app_remove_local':'Remove local app files'}
+         'app_refresh':'Package refresh','app_download':'Download package','app_update':'Update package','app_remove_local':'Remove local package files'}
 
 
 def workspace_job(job):

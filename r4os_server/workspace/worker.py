@@ -43,7 +43,7 @@ def execute(context):
         return connections.remove(context)
     if kind == "app_publish":
         from .apps import publish
-        context.phase("Reading the app listing manifest")
+        context.phase("Reading production software package manifests")
         return publish(context.store, subject, dict({'published':True},**({'targets':payload['targets']} if 'targets' in payload else {})), job_id=job['id'], expected_revision=payload['connection_revision'])
     if kind in ('app_refresh','app_download','app_update','app_remove_local'):
         from .app_releases import run
