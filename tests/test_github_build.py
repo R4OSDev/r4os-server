@@ -119,6 +119,44 @@ class GitHubBuildTests(unittest.TestCase):
         (self.source/'module.R4MF').write_text((self.source/'module.R4MF').read_text().replace('0.1.0','9.9.9'))
         self.assertEqual(build_targets.pinned(self.store,repo,self.module,self.commit)['version'],'0.1.0')
 
+    def test_pinned_git_errors_missing_files_and_real_manifest_mismatches_are_distinct(self):
+        repo=self.store.repository('unusual-project')
+        self.assertIsNone(build_targets.blob(self.store,repo,self.commit,'Cargo.toml'))
+        with self.assertRaisesRegex(ValueError,'missing from the selected source commit'):
+            build_targets.pinned(self.store,repo,dict(self.module,manifest='missing.R4MF'),self.commit)
+        with self.assertRaisesRegex(ValueError,'Could not read the pinned build source'):
+            build_targets.pinned(self.store,repo,self.module,'f'*40)
+        tree=self.git('rev-parse',self.commit+'^{tree}')
+        with self.assertRaisesRegex(ValueError,'not a Git commit'):
+            build_targets.pinned(self.store,repo,self.module,tree)
+        for relative in ('../module.R4MF','/module.R4MF',''):
+            with self.assertRaisesRegex(ValueError,'Invalid build manifest path'):
+                build_targets.blob(self.store,repo,self.commit,relative)
+        for key,value in [('id','OTHER'),('kind','R4L')]:
+            with self.assertRaisesRegex(ValueError,'differs from its pinned manifest'):
+                build_targets.pinned(self.store,repo,dict(self.module,**{key:value}),self.commit)
+        failed=subprocess.CompletedProcess([],128,stdout=b'',stderr=b'fatal: Permission denied (ghp_ExampleSecret12345)')
+        with patch.object(build_targets.subprocess,'run',return_value=failed):
+            with self.assertRaisesRegex(ValueError,'Permission denied') as error:
+                build_targets.pinned(self.store,repo,self.module,self.commit)
+        self.assertNotIn('ghp_ExampleSecret12345',str(error.exception))
+        with patch.object(build_targets.subprocess,'run',side_effect=subprocess.TimeoutExpired('git',20)):
+            with self.assertRaisesRegex(ValueError,'Git timed out'):
+                build_targets.pinned(self.store,repo,self.module,self.commit)
+        (self.source/'linked.R4MF').symlink_to('module.R4MF')
+        self.git('add','linked.R4MF');self.git('commit','-m','Manifest symlink')
+        with self.assertRaisesRegex(ValueError,'regular Git file'):
+            build_targets.pinned(self.store,repo,dict(self.module,manifest='linked.R4MF'),self.git('rev-parse','HEAD'))
+        outside=self.store.root/'Repositories/Main/link';outside.symlink_to(self.source,target_is_directory=True)
+        with self.assertRaisesRegex(ValueError,'symbolic link'):
+            build_targets.blob(self.store,dict(repo,directory='Main/link'),self.commit,'module.R4MF')
+        (self.source/'Cargo.toml').write_text('[package]\nname="game"\nversion="0.2.0"\n')
+        (self.source/'build.zig.zon').write_text('.{ .version = "0.3.0" }\n')
+        self.git('add','Cargo.toml','build.zig.zon');self.git('commit','-m','Native project versions')
+        commit=self.git('rev-parse','HEAD')
+        self.assertEqual(build_targets.pinned(self.store,repo,dict(self.module,manifest='',language='Rust'),commit)['version'],'0.2.0')
+        self.assertEqual(build_targets.pinned(self.store,repo,dict(self.module,manifest='',language='Zig'),commit)['version'],'0.3.0')
+
     def test_full_publish_disables_button_with_exact_tooltip_and_is_idempotent(self):
         job=self.publish();release=self.fake.releases['v0.1.0']
         self.assertFalse(release['draft']);self.assertEqual(self.fake.tags['v0.1.0'],self.commit)
