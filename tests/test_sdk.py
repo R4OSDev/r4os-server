@@ -60,6 +60,11 @@ class SDKTests(unittest.TestCase):
         self.assertFalse(value['releases'][-1]['supported'])
         with patch.object(sdk_catalog.catalog,'public_json',side_effect=AssertionError('cache bypassed')):
             self.assertEqual(sdk_catalog.overview(self.store)['releases'][1]['state'],'active')
+        custom='https://github.com/R4OSDev/r4os-sdk/releases/tag/v0.64.148'
+        with patch.object(sdk_catalog.catalog,'public_json',return_value=(release('0.64.148',148),{})) as request,patch.object(sdk_catalog,'_manifest',return_value='1'*64):
+            self.assertTrue(sdk_catalog.overview(self.store,custom_url=custom)['releases'][0]['custom'])
+            self.assertTrue(sdk_catalog.overview(self.store,custom_url=custom)['releases'][0]['custom'])
+            self.assertEqual(request.call_count,1)
         with patch.object(sdk_catalog.catalog,'public_json',side_effect=RuntimeError('unavailable')):
             offline=sdk_catalog.overview(self.store,refresh=True)
         self.assertTrue(offline['catalog']['stale']);self.assertTrue(offline['catalog']['error'])
@@ -186,6 +191,9 @@ class SDKTests(unittest.TestCase):
     def test_partial_and_legacy_environments_are_not_activatable(self):
         with self.store.connect() as db:db.execute("UPDATE sdk_packages SET status='importing'")
         with self.assertRaisesRegex(ValueError,'complete verification'):toolsets.active(self.store)
+        self.assertIsNone(toolsets.overview(self.store)['active'])
+        with patch.object(sdk_catalog,'remote_catalog',return_value={'releases':[],'stale':True,'error':'offline'}):
+            self.assertEqual(sdk_catalog.overview(self.store)['releases'][0]['state'],'download')
         sdk_packages.publish_index(self.store)
         index=json.loads((self.store.root/'BuildTools/SDK/catalog.json').read_text());self.assertEqual(index['packages'],[])
         old=self.store.root/'BuildTools/Toolsets/old';old.mkdir()

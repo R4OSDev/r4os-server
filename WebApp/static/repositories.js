@@ -3,9 +3,11 @@
   const U=window.R4,E=U.esc,api=(path,options)=>U.api('repositories/'+path,options),sdk=(path,options)=>U.api('sdk/'+path,options);
   const states={missing:'Not downloaded',current:'Up to date',outdated:'Update available',modified:'Locally modified',diverged:'Different branch',ahead:'Local commits',unknown:'Status unknown',empty:'Empty repository',conflict:'Local conflict',queued:'Queued',running:'Running',completed:'Completed',failed:'Failed',cancelled:'Cancelled',interrupted:'Interrupted'};
   let filter='',category='',account='',lastState=null,dialogJob=null,dialogOffset=0,dialogText='',dialogGeneration=0,dialogTrigger=null;
+  const sdkStored=(key,value)=>{try{if(value===undefined)return sessionStorage.getItem(key)||'';sessionStorage.setItem(key,value);}catch{}return '';};
+  let sdkChoice=sdkStored('sdk-release'),sdkCustom=sdkStored('sdk-custom'),sdkData=null,sdkError='',sdkSending=false,sdkRequest=0;
   const active=job=>['queued','running'].includes(job.status);
   const status=value=>'<span class="badge">'+E(states[value]||value||'Unknown')+'</span>';
-  const button=(label,action,name='',disabled=false,primary=false,title='')=>'<button type="button" class="button '+(primary?'primary':'subtle')+'" data-repo-action="'+E(action)+'" data-name="'+E(name)+'"'+(disabled?' disabled':'')+(title?' title="'+E(title)+'"':'')+'>'+(action==='catalog'?U.refreshIcon:'')+E(label)+'</button>';
+  const button=(label,action,name='',disabled=false,primary=false,title='')=>'<button type="button" class="button '+(primary?'primary':'subtle')+'" data-repo-action="'+E(action)+'" data-name="'+E(name)+'"'+(disabled?' disabled':'')+(title?' title="'+E(title)+'"':'')+'>'+(['catalog','sdk_refresh'].includes(action)?U.refreshIcon:'')+E(label)+'</button>';
   async function refreshPage(ctx){
     const focused=document.activeElement,scroll=U.scrollContainer().scrollTop;
     let selector=focused?.id?'#'+CSS.escape(focused.id):focused?.dataset.repoAction?'[data-repo-action="'+CSS.escape(focused.dataset.repoAction)+'"][data-name="'+CSS.escape(focused.dataset.name||'')+'"]':null;
@@ -148,6 +150,68 @@
       else refreshPage(ctx).catch(error=>U.status(error.message,true));
     },2500);
   }
+  function sdkMarkup(){
+    return '<section class="sdk-selector" aria-label="SDK release selection"><form id="sdk-select"><div class="sdk-picker-row"><button type="button" class="button subtle sdk-custom" data-repo-action="sdk_custom" title="Custom URL" aria-label="Custom URL"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m10 13 4-4m-6 6-1 1a4 4 0 0 1-6-6l4-4a4 4 0 0 1 6 0m2 2 1-1a4 4 0 0 1 6 6l-4 4a4 4 0 0 1-6 0"/></svg></button><select id="sdk-release" name="release_url" aria-label="SDK release" required></select><div class="sdk-action-area"><span class="sdk-ring-slot"><span id="sdk-progress" class="sdk-progress" role="progressbar" aria-label="SDK preparation" hidden></span></span><button id="sdk-activate" class="button sdk-activate" type="submit" aria-describedby="sdk-message" disabled>Download and Activate</button><div class="sdk-inline-status" role="status" aria-live="polite"><button id="sdk-message" class="sdk-message" type="button"></button></div></div></div></form></section>';
+  }
+  function applySdk(){
+    const select=document.querySelector('#sdk-release'),main=document.querySelector('#sdk-activate');if(!select||!main)return;
+    const releases=sdkData?.releases||[],job=sdkData?.job,running=job&&active(job);
+    if(running)sdkChoice=job.payload.release_url;
+    if(!releases.some(item=>item.release_url===sdkChoice))sdkChoice=sdkData?.active_url||releases.find(item=>item.supported)?.release_url||releases[0]?.release_url||'';
+    sdkStored('sdk-release',sdkChoice);
+    const signature=JSON.stringify(releases.map(item=>[item.release_url,item.version,item.state,item.prerelease,item.custom,item.supported]));
+    if(select.dataset.options!==signature){
+      select.innerHTML=releases.length?releases.map(item=>'<option value="'+E(item.release_url)+'" title="'+E(item.reason||'')+'">'+E('SDK '+item.version+(item.prerelease?' · Prerelease':'')+(item.custom?' · Custom':'')+(!item.supported?' · Unsupported':''))+'</option>').join(''):'<option value="">No SDK releases available</option>';
+      select.dataset.options=signature;
+    }
+    select.value=sdkChoice;select.disabled=!!running||sdkSending||!releases.length;
+    const item=releases.find(item=>item.release_url===sdkChoice),state=item?.state||'download';
+    const relevant=job?.payload?.release_url===sdkChoice?job:null,busy=!!(relevant&&active(relevant));
+    main.textContent=state==='active'?'Active':state==='installed'?'Activate':'Download and Activate';
+    main.classList.toggle('is-active',state==='active');
+    main.disabled=state==='active'||!item?.supported||busy||sdkSending;
+    main.title=state==='active'?'This SDK is active.':item?.reason||'Prepare and activate this SDK.';
+    document.querySelector('[data-repo-action="sdk_custom"]').disabled=!!running||sdkSending;
+    document.querySelector('[data-repo-action="sdk_refresh"]').disabled=sdkSending;
+    const ring=document.querySelector('#sdk-progress'),progress=relevant?.result?.progress||{};
+    ring.hidden=!busy&&!sdkSending;
+    const percent=Number.isFinite(progress.percent)?Math.max(0,Math.min(100,progress.percent)):null;
+    ring.classList.toggle('is-indeterminate',percent===null);
+    ring.style.setProperty('--sdk-progress',(percent??24)*3.6+'deg');
+    ring.setAttribute('aria-label',progress.scope?'Downloading '+progress.scope:'SDK preparation');
+    ring.setAttribute('aria-valuemin','0');ring.setAttribute('aria-valuemax','100');
+    if(percent!==null)ring.setAttribute('aria-valuenow',String(Math.round(percent)));else ring.removeAttribute('aria-valuenow');
+    ring.title=progress.scope?(progress.scope+(percent!==null?' · '+Math.round(percent)+'%':' progress unavailable')):'Preparing SDK';
+    let message=sdkSending?'Starting SDK preparation…':sdkError||(!item?.supported?item?.reason:'')||relevant?.error||sdkData?.catalog?.error||progress.message||(busy?'Waiting for the build worker…':'')||'';
+    if(relevant?.status==='cancelled')message='SDK preparation cancelled. The previous SDK remains active.';
+    if(relevant?.status==='interrupted')message='SDK preparation was interrupted. Select the action to retry.';
+    message=String(message).replace(/\s+/g,' ').trim();
+    const node=document.querySelector('#sdk-message');if(node.textContent!==message)node.textContent=message;
+    node.title=message+(relevant?' · Open full job log':'');
+    node.classList.toggle('is-error',!!(sdkError||relevant?.error||!item?.supported||sdkData?.catalog?.error));
+    if(relevant){node.dataset.repoAction='job';node.dataset.name=relevant.id;}
+    else{delete node.dataset.repoAction;delete node.dataset.name;}
+    main.setAttribute('aria-busy',String(busy||sdkSending));
+  }
+  async function readSdk(ctx,refresh=false,custom=sdkCustom){
+    const request=++sdkRequest,query=new URLSearchParams();if(refresh)query.set('refresh','1');if(custom)query.set('release_url',custom);
+    const data=await sdk('releases'+(query.size?'?'+query:''));
+    if(request!==sdkRequest||ctx.generation!==U.generation)return null;
+    sdkData=data;return data;
+  }
+  function pollSdk(ctx){
+    clearTimeout(U.poll);
+    if(!sdkData?.job||!active(sdkData.job))return;
+    U.poll=setTimeout(async()=>{
+      if(ctx.generation!==U.generation)return;
+      if(!document.querySelector('#detail-dialog[open]')){
+        try{if(await readSdk(ctx))sdkError='';}catch(error){sdkError=error.message;}
+        if(ctx.generation!==U.generation)return;
+        applySdk();
+      }
+      pollSdk(ctx);
+    },2000);
+  }
   async function tools(ctx){
     const pages=[['sdk','SDK'],['build-environment','Build Environment'],['environments','Environments'],['development','Development'],['maintenance','Maintenance'],['jobs','Jobs']];
     const selected=pages.some(([id])=>id===ctx.leaf)?ctx.leaf:'sdk';
@@ -157,7 +221,8 @@
     const ready=value.packages.filter(item=>item.status==='ready');
     let html='';
     if(selected==='sdk'){
-      html='<section class="panel panel-body"><h2>SDK packages</h2><p>The SDK selects build profiles, exact tools, Contract and system libraries. Package originals are immutable.</p><form id="sdk-import"><label>Official SDK release URL<input name="release_url" type="url" required placeholder="https://github.com/R4OSDev/r4os-sdk/releases/tag/v0.64.145"></label><button class="button primary" type="submit">Import and verify SDK</button><p class="form-message" role="alert"></p></form></section>';
+      try{await readSdk(ctx);sdkError='';}catch(error){sdkError=error.message;}if(ctx.generation!==U.generation)return;
+      html=sdkMarkup();
       const packages=value.packages.map(item=>{
         let content='<h2 class="record-name">SDK '+E(item.version)+'</h2><span class="record-subline">'+E(item.status)+'</span>'+(item.error?'<p class="notice error">'+E(item.error)+'</p>':'')+U.fields([['Package ID','<code>'+E(item.id)+'</code>'],['Source revision','<code>'+E(item.source.commit)+'</code>']]);
         if(item.status==='ready'){
@@ -167,7 +232,7 @@
         }
         return U.record(content,item.status==='ready'?button('Verify package','sdk_verify',item.id):'');
       });
-      if(packages.length)html+='<section class="record-section" aria-label="SDK packages">'+U.records(packages,'SDK packages')+'</section>';
+      if(packages.length)html+='<details class="sdk-details"><summary>Package details</summary><section class="record-section" aria-label="SDK packages">'+U.records(packages,'SDK packages')+'</section></details>';
     }else if(selected==='build-environment'){
       html='<section class="panel panel-body"><h2>Build environment</h2><p>Host: '+E(value.host)+' · Active SDK: '+E(value.sdk?.version||'Not configured')+'</p><form id="sdk-setup"><label>Verified SDK<select name="sdk_id" required>'+ready.map(item=>'<option value="'+E(item.id)+'"'+(item.id===value.sdk?.id?' selected':'')+'>'+E(item.version+' · '+item.source.commit.slice(0,12))+'</option>').join('')+'</select></label><fieldset><legend>SDK-owned setup</legend>'+['zig','rust','limine','qemu'].map(name=>'<label class="toggle-control"><input type="checkbox" name="tools" value="'+name+'"'+(['zig','rust'].includes(name)?' checked':'')+'> '+E(name)+'</label>').join('')+'</fieldset><p class="muted">Graphics, shader and platform prerequisites are verified by their native owner builders.</p><button type="submit" class="button primary"'+(!ready.length?' disabled':'')+'>Set up and activate</button> '+button('Check active environment','tools_check','',!value.active)+'<p class="form-message" role="alert"></p></form>'+U.table(['Tool','SDK requirement','Installed','State'],value.components.map(item=>[E(item.name),E(item.required),E(item.installed||'—'),E(item.state)]))+'</section>';
     }else if(selected==='environments'){
@@ -179,10 +244,11 @@
     }else{
       html='<section class="record-section" aria-label="Tool jobs"><p><a class="artifact-link" href="#repositories/logs/tools">Open all tool logs</a></p>'+(jobPage.jobs.length?jobRows(jobPage.jobs):U.empty('No tool jobs yet','SDK and tool jobs appear here after an action starts.'))+'</section>';
     }
-    if(value.errors?.length)html='<p class="workspace-notice">'+E(value.errors.join(' · '))+'</p>'+html;
-    U.page(ctx,'Tools','',html);
+    if(selected!=='sdk'&&value.errors?.length)html='<p class="workspace-notice">'+E(value.errors.join(' · '))+'</p>'+html;
+    U.page(ctx,'Tools','',html,'',selected==='sdk'?button('Refresh','sdk_refresh','',false,false):true);
     U.status(pages.find(([id])=>id===selected)[1]+' loaded.');
-    if((jobPage?.jobs||value.jobs).some(active))pollTools(ctx);
+    if(selected==='sdk'){applySdk();pollSdk(ctx);}
+    else if((jobPage?.jobs||value.jobs).some(active))pollTools(ctx);
   }
 
   function releaseRepository(repo,member){
@@ -291,6 +357,7 @@
     finally{if(checkbox.isConnected)checkbox.disabled=false;}
   });
   document.addEventListener('change',event=>{
+    if(event.target.id==='sdk-release'){sdkChoice=event.target.value;sdkStored('sdk-release',sdkChoice);sdkError='';applySdk();}
     if(event.target.id==='repository-category'){category=event.target.value;applyFilter();}
     if(event.target.id==='repository-account'){account=event.target.value;applyFilter();}
   });
@@ -303,6 +370,13 @@
     if(['details','job','edit'].includes(action))dialogTrigger=node;
     node.disabled=true;
     try{
+      if(action==='sdk_custom'){
+        dialogJob=null;dialogGeneration=U.generation;dialogTrigger=node;
+        U.open('Custom SDK release','<form id="sdk-custom-url"><label>SDK release URL<input type="url" name="release_url" required value="'+E(sdkCustom||sdkChoice)+'" placeholder="https://github.com/R4OSDev/r4os-sdk/releases/tag/v0.64.145"></label><div class="form-actions"><button type="submit" class="button primary">Use URL</button><button type="button" class="button subtle" data-action="close-dialog">Cancel</button></div><p class="form-message" role="alert"></p></form>');return;
+      }
+      if(action==='sdk_refresh'){
+        const ctx=U.current;try{if(await readSdk(ctx,true)){sdkError='';applySdk();pollSdk(ctx);}}catch(error){sdkError=error.message;applySdk();}return;
+      }
       if(action==='release_delete'||action==='test_delete'){
         const isRelease=action==='release_delete',form=document.querySelector(isRelease?'#release-edit':'#test-configuration');
         const label=isRelease?'Release type':'Test configuration';
@@ -333,6 +407,26 @@
     }catch(error){U.status(error.message,true);}finally{node.disabled=false;}
   });
   document.addEventListener('submit',async event=>{
+    if(event.target.id==='sdk-custom-url'){
+      event.preventDefault();const form=event.target,submit=form.querySelector('[type=submit]'),ctx=U.current,url=new FormData(form).get('release_url').trim();submit.disabled=true;
+      try{
+        if(await readSdk(ctx,false,url)){
+          sdkCustom=url;sdkChoice=url;sdkStored('sdk-custom',url);sdkStored('sdk-release',url);sdkError='';
+          document.querySelector('#detail-dialog')?.close();applySdk();pollSdk(ctx);
+        }
+      }catch(error){form.querySelector('.form-message').textContent=error.message;}finally{submit.disabled=false;}return;
+    }
+    if(event.target.id==='sdk-select'){
+      event.preventDefault();const ctx=U.current,url=document.querySelector('#sdk-release').value;
+      if(sdkSending||document.querySelector('#sdk-activate').disabled)return;
+      sdkSending=true;sdkError='';applySdk();
+      try{
+        const job=await sdk('selection',{method:'POST',body:{release_url:url}});
+        if(ctx.generation!==U.generation)return;
+        sdkData={...sdkData,job};sdkChoice=url;
+      }catch(error){if(ctx.generation===U.generation)sdkError=error.message;}
+      finally{sdkSending=false;if(ctx.generation===U.generation){applySdk();pollSdk(ctx);}}return;
+    }
     if(['sdk-import','sdk-setup','sdk-project','sdk-development'].includes(event.target.id)){
       event.preventDefault();const form=event.target,submit=form.querySelector('[type=submit]'),values=new FormData(form);submit.disabled=true;
       try{

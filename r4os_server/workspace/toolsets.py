@@ -136,6 +136,8 @@ def overview(store):
     current = next((item for item in sets if item['id'] == key and item['status'] == 'ready'), None)
     packages = [sdk_packages.summary(item) for item in sdk_packages.packages(store)]
     selected = next((item for item in packages if current and item['id'] == current['sdk_id']), None)
+    if not selected or selected['status'] != 'ready':
+        current, selected = None, None
     components = []
     if selected:
         metadata = sdk_packages.get(store, selected['id'])

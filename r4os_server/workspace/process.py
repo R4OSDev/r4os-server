@@ -62,7 +62,7 @@ class Context:
             raise Cancelled("Job cancelled.")
 
     def progress(self, stage, message, *, downloaded=None, total=None, percent=None, scope=None):
-        if self.job['kind'] != 'sdk_select':
+        if self.job['kind'] != 'sdk_select' or getattr(self, 'activation_committed', False):
             return
         self.check()
         message = scrub(re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', str(message)))

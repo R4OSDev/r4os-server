@@ -158,6 +158,31 @@ def prepared(store, package, environment):
         return False
 
 
+def custom_release(store, url, refresh=False):
+    _, version = sdk_packages.release_base(url)
+    cache = store.setting('sdk-custom-releases', {})
+    previous = cache.get(url, {})
+    if not refresh and time.time()-previous.get('attempted', 0) < (60 if previous.get('failed') else 300):
+        return dict(previous['record'])
+    failed = False
+    try:
+        item, _ = catalog.public_json(REPOSITORY+'/releases/tags/'+quote('v'+version, safe=''), _credential(store))
+        if item.get('draft'):
+            raise ValueError('The selected SDK release is not published.')
+        record = release_record(item)
+        if record['release_url'] != url:
+            raise ValueError('The release identity differs from the requested SDK.')
+        record['custom'] = True
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+        failed = True
+        record = {'release_url':url, 'tag':'v'+version, 'version':version, 'supported':False,
+                  'custom':True, 'reason':'The custom SDK release could not be loaded. Check the URL and retry.'}
+    cache[url] = {'attempted':time.time(), 'record':record, 'failed':failed}
+    cache = dict(sorted(cache.items(), key=lambda pair:pair[1]['attempted'], reverse=True)[:32])
+    store.set('sdk-custom-releases', cache)
+    return dict(record)
+
+
 def overview(store, *, refresh=False, custom_url=None):
     cache = remote_catalog(store, refresh=refresh)
     records = {item['release_url']: dict(item) for item in cache.get('releases', [])}
@@ -171,17 +196,7 @@ def overview(store, *, refresh=False, custom_url=None):
                                 'version': package['manifest']['sdk_version'], 'supported': True,
                                 'reason': '', 'custom': True, 'prerelease': False})
     if custom_url and custom_url not in records:
-        _, version = sdk_packages.release_base(custom_url)
-        try:
-            item, _ = catalog.public_json(REPOSITORY+'/releases/tags/'+quote('v'+version, safe=''), _credential(store))
-            if item.get('draft'):
-                raise ValueError('The selected SDK release is not published.')
-            record = release_record(item)
-            record['custom'] = True
-            records[custom_url] = record
-        except (OSError, RuntimeError, ValueError, KeyError, TypeError):
-            records[custom_url] = {'release_url': custom_url, 'tag': 'v'+version, 'version': version,
-                                   'supported': False, 'custom': True, 'reason': 'The custom SDK release could not be loaded. Check the URL and retry.'}
+        records[custom_url] = custom_release(store, custom_url, refresh)
     for url, record in records.items():
         package = next((p for p in packages if p['release_url'] == url), None)
         ready = next((env for env in environments if package and env.get('sdk_id') == package['id'] and prepared(store, package, env)), None)
