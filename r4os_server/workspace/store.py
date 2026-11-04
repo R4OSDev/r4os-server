@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 
 ACTIVE = ("queued", "running")
 SDK_MUTATIONS = ('sdk_select', 'sdk_import', 'sdk_cleanup', 'tools_install', 'tools_update', 'tools_activate')
-FOLDERS = ("Repositories", "BuildTools", "Artifacts", "Release")
+FOLDERS = ("Repositories", "BuildTools", "Artifacts", "Release", "Apps")
 REPOSITORY_ACTIONS = ('refresh','refresh_all','catalog','check','download','update','download_all','update_all','build','build_publish','app_publish','connection_delete')
 REPOSITORY_FIELDS = ("r.*,c.status AS connection_status,c.revision AS connection_revision,c.has_token AS connection_has_token,c.catalog AS connection_catalog,"
                      "COALESCE((SELECT published FROM apps WHERE repository_name=r.name),0) AS app_published,"
@@ -97,6 +97,8 @@ class Store:
             initialize_metadata(db)
             from .apps import initialize as initialize_apps
             initialize_apps(db)
+            from .app_storage import initialize as initialize_app_storage
+            initialize_app_storage(db)
             from .github_build import initialize as initialize_github_builds
             initialize_github_builds(db)
             from .sdk_packages import initialize as initialize_sdks

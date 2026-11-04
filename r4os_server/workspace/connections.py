@@ -364,6 +364,9 @@ def remove(context):
             marker.unlink(missing_ok=True)
             folder.rmdir()
         context.phase("Removing connection and credentials")
+        from .app_storage import remove as remove_app_files, remove_orphans
+        remove_app_files(store, names)
+        remove_orphans(store, repos, names)
         write_token(store, key, "")
         with store.connect() as db:
             db.execute("BEGIN IMMEDIATE")

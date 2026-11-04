@@ -10,7 +10,7 @@ import time
 
 from . import catalog, connections, layout
 from .process import Context, Cancelled, scrub
-from .store import Store, now
+from .store import Store, now, FOLDERS
 
 
 def execute(context):
@@ -152,9 +152,11 @@ def main():
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         raise SystemExit("A worker is already running.")
-    for folder in ("Repositories", "BuildTools", "Artifacts", "Release"):
+    for folder in FOLDERS:
         (store.root / folder).mkdir(exist_ok=True)
     store.recover()
+    from .app_storage import recover as recover_apps
+    recover_apps(store)
     layout.migrate(store)
     for connection in connections.list_connections(store):
         if connection["status"] == "deleting":

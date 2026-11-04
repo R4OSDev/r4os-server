@@ -22,6 +22,24 @@ MANIFEST = 'R4OS_MODULE_MANIFEST=2\nKIND=R4X\nNAME=MINESWEEPER_665F9DD0\nVERSION
 
 
 class AppTests(unittest.TestCase):
+    def staged_release(self, name='minesweeper', release_id=11, content=b'github-release'):
+        import hashlib
+        from r4os_server.workspace import app_storage
+        from r4os_server.workspace.process import Context
+        apps.publish(self.store, name, {'published': True})
+        repo = self.store.repository(name)
+        job = self.store.enqueue('app_download', name)
+        self.store.change_job(job['id'], status='running')
+        context = Context(self.store, self.store.job(job['id']))
+        staged = app_storage.path(self.store, 'Apps/.staging/'+job['id'])
+        staged.mkdir(parents=True)
+        (staged/'GAME.R4X').write_bytes(content)
+        selection = {'repository_id': repo['id'], 'release_id': release_id, 'tag': 'v0.1.0',
+                     'version': '0.1.0', 'target': 'GAME', 'commit': 'a'*40,
+                     'files': [{'id': 31, 'name': 'GAME.R4X', 'size': len(content),
+                                'sha256': hashlib.sha256(content).hexdigest()}]}
+        return context, repo, selection, staged
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -216,3 +234,55 @@ class AppTests(unittest.TestCase):
             self.assertEqual(failed['apps'][0]['description'], '<b>Literal text</b>')
         finally:
             server.shutdown();server.server_close();thread.join(timeout=5)
+
+    def test_app_storage_is_stable_verified_and_recovers_a_rename_before_commit(self):
+        from r4os_server.workspace import app_storage
+        context, repo, selection, staged = self.staged_release()
+        destination = app_storage.path(self.store, app_storage.directory(repo['id'], selection['release_id']))
+        destination.parent.mkdir(parents=True)
+        import shutil
+        shutil.copytree(staged, destination)  # Crash after filesystem rename, before the SQLite commit.
+        result = app_storage.install(context, repo, connections.get(self.store, 'main')['revision'], selection, staged)
+        self.assertTrue(result['activation_committed'])
+        self.assertTrue(app_storage.current(self.store, repo['name'], hashes=True)['valid'])
+        self.store.change_job(context.job['id'], status='completed')
+        apps.save(self.store, repo['name'], self.settings(display_name='Renamed app'))
+        self.assertEqual(app_storage.current(Store(self.store.root), repo['name'])['directory'], 'Apps/1/Releases/11')
+        (destination/'GAME.R4X').write_bytes(b'corrupted-file')
+        self.assertFalse(app_storage.current(self.store, repo['name'], hashes=True)['valid'])
+        with self.assertRaises(ValueError): app_storage.path(self.store, 'Apps/../Artifacts')
+        (self.store.root/'Apps/link').symlink_to(self.root, target_is_directory=True)
+        with self.assertRaises(ValueError): app_storage.path(self.store, 'Apps/link/other')
+
+    def test_app_storage_keeps_previous_release_on_bad_download_and_recovers_staging(self):
+        from r4os_server.workspace import app_storage
+        context, repo, selection, staged = self.staged_release()
+        revision = connections.get(self.store, 'main')['revision']
+        app_storage.install(context, repo, revision, selection, staged)
+        self.store.change_job(context.job['id'], status='completed')
+        bad, repo, new, partial = self.staged_release(release_id=12)
+        (partial/'GAME.R4X').write_bytes(b'broken')
+        with self.assertRaises(ValueError): app_storage.install(bad, repo, revision, new, partial)
+        self.assertEqual(app_storage.current(self.store, repo['name'])['release_id'], 11)
+        self.store.recover();app_storage.recover(self.store)
+        self.assertFalse(partial.exists())
+        self.assertEqual(app_storage.current(self.store, repo['name'])['release_id'], 11)
+
+    def test_shared_app_release_removal_preserves_other_connection_and_manual_fields(self):
+        from r4os_server.workspace import app_storage
+        context, repo, selection, staged = self.staged_release()
+        app_storage.install(context, repo, connections.get(self.store, 'main')['revision'], selection, staged)
+        self.store.change_job(context.job['id'], status='completed')
+        conn = connections.save(self.store, {'url': 'https://github.com/Other'})
+        self.seed('other-copy', 1, conn['id'])
+        apps.publish(self.store, 'other-copy', {'published': True})
+        with self.store.connect() as db:
+            db.execute('INSERT INTO app_release_refs VALUES(?,?,?,1)', ('other-copy', 1, 11))
+        apps.save(self.store, 'minesweeper', self.settings(description='Keep description'))
+        app_storage.remove(self.store, {'minesweeper'})
+        self.assertIsNone(app_storage.current(self.store, 'minesweeper'))
+        self.assertTrue(app_storage.current(self.store, 'other-copy')['valid'])
+        self.assertEqual(apps.get(self.store, 'minesweeper')['description'], 'Keep description')
+        removal = SimpleNamespace(store=self.store, job={'id': 'delete', 'subject': conn['id']}, phase=lambda *_: None)
+        connections.remove(removal)
+        self.assertFalse(app_storage.path(self.store, 'Apps/1/Releases/11').exists())
