@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 ACTIVE = ("queued", "running")
 SDK_MUTATIONS = ('sdk_select', 'sdk_import', 'sdk_cleanup', 'tools_install', 'tools_update', 'tools_activate')
 FOLDERS = ("Repositories", "BuildTools", "Artifacts", "Release")
-REPOSITORY_ACTIONS = ('refresh','catalog','check','download','update','download_all','update_all','build','build_publish','app_publish','connection_delete')
+REPOSITORY_ACTIONS = ('refresh','refresh_all','catalog','check','download','update','download_all','update_all','build','build_publish','app_publish','connection_delete')
 REPOSITORY_FIELDS = ("r.*,c.status AS connection_status,c.revision AS connection_revision,c.has_token AS connection_has_token,c.catalog AS connection_catalog,"
                      "COALESCE((SELECT published FROM apps WHERE repository_name=r.name),0) AS app_published,"
                      "EXISTS(SELECT 1 FROM jobs WHERE kind='app_publish' AND subject=r.name AND status IN ('queued','running') AND cancel=0) AS app_publishing,"
@@ -30,6 +30,8 @@ class Conflict(ValueError):
 
 
 def affects_repository(job, repo):
+    if job['kind']=='refresh_all':
+        return any(item['id']==repo['connection_id'] for item in job['payload'].get('connections',[]))
     if job['subject'] == repo['name']:
         return True
     if job['kind'] == 'connection_delete':
@@ -237,29 +239,38 @@ class Store:
         if layout and json.loads(layout[0]).get("status") != "ready":
             raise Conflict("Repository directory migration is incomplete. Check the worker before starting new jobs.")
         source = db.execute("SELECT name,connection_id,metadata FROM repositories WHERE name=?", (subject,)).fetchone()
+        parent=db.execute("SELECT * FROM jobs WHERE id=? AND kind='refresh_all' AND status='running' AND cancel=0",(payload.get('batch_id',''),)).fetchone() if kind=='refresh' else None
+        batch_child=bool(parent and source and any(item['id']==source['connection_id'] and item['revision']==payload.get('connection_revision') for item in json.loads(parent['payload']).get('connections',[])))
         if source:
             metadata = json.loads(source['metadata'])
-            if metadata.get("private"):
+            if metadata.get("private") and not batch_child:
                 self.require_repository(subject)
             payload = dict(payload, repository_label=(metadata.get("owner", "") + "/" if metadata.get("owner") else "") + metadata.get("display_name", subject))
         if kind == 'refresh':
             if source is None:
                 raise ValueError('A managed repository is required for Refresh.')
-            self.require_repository(subject)
+            if not batch_child:self.require_repository(subject)
             for row in db.execute("SELECT * FROM jobs WHERE status IN ('queued','running')"):
                 job = self.job_record(row)
+                if batch_child and job['id']==payload['batch_id']:continue
                 if job['kind'] not in REPOSITORY_ACTIONS or not affects_repository(job, source):
                     continue
-                inputs = {k:v for k,v in job['payload'].items() if k != 'repository_label'}
-                wanted = {k:v for k,v in payload.items() if k != 'repository_label'}
+                inputs = {k:v for k,v in job['payload'].items() if k not in ('repository_label','batch_id','catalog_at')}
+                wanted = {k:v for k,v in payload.items() if k not in ('repository_label','batch_id','catalog_at')}
                 if job['kind'] == 'refresh' and inputs == wanted and not job['cancel']:
                     return job
                 raise Conflict('Another action already uses this repository: '+job['id'])
-        elif kind in REPOSITORY_ACTIONS and kind != 'connection_delete':
+        elif kind in REPOSITORY_ACTIONS and kind not in ('connection_delete','refresh_all'):
             for row in db.execute("SELECT j.*,r.connection_id AS refresh_connection FROM jobs j JOIN repositories r ON r.name=j.subject WHERE j.kind='refresh' AND j.status IN ('queued','running')"):
                 target = {'name':row['subject'], 'connection_id':row['refresh_connection']}
                 if affects_repository({'kind':kind,'subject':subject,'payload':payload}, target):
                     raise Conflict('This repository is being refreshed. Retry after the refresh finishes.')
+            for row in db.execute("SELECT * FROM jobs WHERE kind='refresh_all' AND status IN ('queued','running')"):
+                job=self.job_record(row)
+                overlap=source is not None and affects_repository(job,source)
+                if kind in ('catalog','check','download_all','update_all') and not subject:
+                    overlap=any(not payload.get('connection_id') or payload['connection_id']==item['id'] for item in job['payload']['connections'])
+                if overlap:raise Conflict('Refresh all already uses this repository. Wait for it to finish.')
         if kind != "connection_delete":
             from .connections import referenced
             candidate = {"kind": kind, "subject": subject, "payload": payload}
@@ -343,7 +354,7 @@ class Store:
         if subject is not None:
             clauses.append("subject=?")
             args.append(subject)
-        categories = {"all": "", "repositories": "kind IN ('refresh','catalog','download','update','download_all','update_all','check','connection_delete')",
+        categories = {"all": "", "repositories": "kind IN ('refresh','refresh_all','catalog','download','update','download_all','update_all','check','connection_delete')",
                       "tools": "(kind GLOB 'tools_*' OR kind GLOB 'sdk_*')", "builds": "kind IN ('build','build_publish')", "releases": "kind='release'"}
         if category not in categories:
             raise ValueError("Unknown log category.")
@@ -379,6 +390,8 @@ class Store:
             row = db.execute("SELECT * FROM jobs WHERE id=?", (key,)).fetchone()
             if row is None:
                 raise ValueError("Job not found.")
+            if row['kind']=='refresh_all':
+                db.execute("UPDATE jobs SET cancel=1,status=CASE WHEN status='queued' THEN 'cancelled' ELSE status END,finished=CASE WHEN status='queued' THEN ? ELSE finished END WHERE json_extract(payload,'$.batch_id')=? AND status IN ('queued','running')",(now(),key))
             if row["status"] == "queued":
                 db.execute("UPDATE jobs SET status='cancelled',cancel=1,finished=? WHERE id=?", (now(), key))
             elif row["status"] == "running" and not json.loads(row['result']).get('activation_committed'):

@@ -7,7 +7,7 @@ import time
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from ..common.http import HTTPError
-from . import releases, testconfigs, connections, repo_metadata, apps, github_build
+from . import releases, testconfigs, connections, repo_metadata, apps, github_build, catalog
 from .store import ACTIVE, identifier, under, update_candidate
 
 
@@ -118,9 +118,12 @@ def dispatch(handler):
                                       "last_success": store.last_success(parts[1], "build")})
         if len(parts) == 2 and parts[0] == "actions" and method == "POST":
             kind = parts[1]
-            if kind not in ("refresh", "catalog", "download", "update", "download_all", "update_all", "check"):
+            if kind not in ("refresh_all", "refresh", "catalog", "download", "update", "download_all", "update_all", "check"):
                 raise ValueError("Unknown repository action.")
             value = data(handler)
+            if kind=='refresh_all':
+                if value:raise ValueError('Refresh all requires an empty JSON object.')
+                return handler.json(202,catalog.request_refresh_all(store))
             name = value.get("name", "")
             if kind == 'refresh':
                 if set(value) != {'name'} or not name:
@@ -138,10 +141,13 @@ def dispatch(handler):
                     raise ValueError("This connection is being deleted.")
             if kind == 'catalog':
                 with store.connect() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    job=store.enqueue(kind,name,{"connection_id":scope} if scope else {},connection=db)
                     if scope:
                         db.execute('DELETE FROM github_release_status WHERE repository_name IN (SELECT name FROM repositories WHERE connection_id=?)', (scope,))
                     else:
                         db.execute('DELETE FROM github_release_status')
+                return handler.json(202,job)
             return handler.json(202, store.enqueue(kind, name, {"connection_id": scope} if scope else {}))
         if parts == ["jobs"] and read:
             query = parse_qs(url.query)

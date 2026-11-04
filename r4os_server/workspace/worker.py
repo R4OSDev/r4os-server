@@ -16,6 +16,7 @@ from .store import Store, now
 def execute(context):
     job = context.job
     kind, subject, payload = job["kind"], job["subject"], job["payload"]
+    if kind=='refresh_all':return catalog.refresh_all(context)
     if kind.startswith('sdk_'):
         from . import sdk_packages
         if kind == 'sdk_catalog':

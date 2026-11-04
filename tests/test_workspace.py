@@ -318,6 +318,52 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(self.store.repository('same')['refresh_job']['id'],jobs[0]['id'])
         self.assertEqual(self.store.job_count(category='repositories'),4)
 
+    def test_refresh_all_fans_out_and_reuses_fresh_catalogue_without_cloning(self):
+        from r4os_server.workspace import github_build
+        other=connections.save(self.store,{'url':'https://github.com/OtherOwner','token':'fixture-private-token'})
+        main=[{'id':100+n,'name':'same' if n==0 else 'repo-'+str(n),'owner':{'login':'R4OSDev'},'private':False,'default_branch':'main'} for n in range(40)]
+        private={'id':200,'name':'same','owner':{'login':'OtherOwner'},'private':True,'default_branch':'main'}
+        def pages(context,endpoint,credential=''):
+            return iter(main if '/R4OSDev/' in endpoint else [private] if credential else [])
+        with patch.object(catalog,'pages',side_effect=pages),patch.object(catalog,'public_json',return_value=([],{})):
+            for key in ('main',other['id']):
+                context=self.context('catalog');catalog.refresh(context,key,inspect_local=False)
+                self.store.change_job(context.job['id'],status='completed')
+            connections.select(self.store,other['id'],{'enabled':True})
+            with ThreadPoolExecutor(max_workers=4) as pool:parents=list(pool.map(lambda _:catalog.request_refresh_all(self.store),range(4)))
+            self.assertEqual(len({job['id'] for job in parents}),1)
+            with self.assertRaises(Conflict):self.store.enqueue('update','same')
+            with patch.object(catalog,'inspect') as inspect:
+                self.assertTrue(worker.once(self.store));inspect.assert_not_called()
+        queued=self.store.active_jobs();self.assertEqual(len(queued),41)
+        self.assertEqual(len({job['subject'] for job in queued}),41)
+        self.assertTrue(all(job['kind']=='refresh' and job['payload']['batch_id']==parents[0]['id'] for job in queued))
+        self.assertEqual(catalog.request_refresh_all(self.store)['id'],parents[0]['id'])
+        same=next(job for job in queued if job['subject']=='same')
+        self.assertEqual(self.store.enqueue('refresh','same',{'connection_id':'main','connection_revision':same['payload']['connection_revision']})['id'],same['id'])
+        with patch.object(catalog,'public_json') as request,patch.object(github_build,'refresh',return_value={'targets':[]}):
+            self.assertTrue(worker.once(self.store));request.assert_not_called()
+        self.assertFalse(any(path.name=='.git' for path in (self.store.root/'Repositories').rglob('.git')))
+        self.store.cancel_job(parents[0]['id']);self.assertEqual(self.store.active_jobs(),[])
+
+    def test_refresh_all_isolates_catalogue_failure_and_rejects_changed_revision(self):
+        self.connection_catalog('R4OSDev','main',[('same',10)])
+        other=connections.save(self.store,{'url':'https://github.com/Unavailable'})
+        original=catalog.refresh
+        def refresh(context,key,**options):
+            if key==other['id']:raise catalog.GitHubError(401,'Fixture token rejected')
+            items=[{'id':10,'name':'same','owner':{'login':'R4OSDev'},'private':False,'default_branch':'main'}]
+            with patch.object(catalog,'public_json',return_value=(items,Message())):return original(context,key,**options)
+        parent=catalog.request_refresh_all(self.store)
+        with patch.object(catalog,'refresh',side_effect=refresh):self.assertTrue(worker.once(self.store))
+        self.assertEqual(len(self.store.active_jobs()),1)
+        self.assertEqual(sum(item['status']=='failed' for item in self.store.job(parent['id'])['result']['connections']),1)
+        self.assertIn('token rejected',connections.get(self.store,other['id'])['catalog']['error'])
+        with self.store.connect() as db:db.execute("UPDATE connections SET revision=revision+1 WHERE id='main'")
+        child=self.store.active_jobs()[0];self.assertTrue(worker.once(self.store))
+        self.assertEqual(self.store.job(child['id'])['status'],'failed')
+        self.assertIn('connection changed',self.store.job(child['id'])['error'])
+
     def test_bulk_updates_pin_targets_and_preserve_changes_while_waiting(self):
         from r4os_server.workspace.worker import execute
         source = self.root / "bulk-upstream"

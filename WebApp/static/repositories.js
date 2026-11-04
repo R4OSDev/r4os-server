@@ -91,12 +91,12 @@
       return U.record(content,actions,' data-record-key="'+E(repo.name)+'" aria-busy="'+refreshing+'" data-repo-search="'+E(repositorySearch(repo))+'" data-category="'+E(classification)+'" data-account="'+E((repo.owner||'').toLowerCase())+'"'+(repositoryMatches(repo)?'':' hidden'),'repository-entry'+(refreshing?' is-refreshing':''));
     }),'Repository overview')+'</div><div id="repository-filter-empty"'+(matching?' hidden':'')+'>'+U.empty('No matching repositories','Choose another category or change the search.')+'</div>':U.empty('No catalogue yet','Connect an account and enable its repositories in Connections.');
     html+='</section>';
-    const repositoryBusy=jobs.some(job=>['refresh','catalog','check','download','download_all','update','update_all','connection_delete'].includes(job.kind));
+    const repositoryBusy=jobs.some(job=>['refresh_all','refresh','catalog','check','download','download_all','update','update_all','connection_delete'].includes(job.kind));
     const canDownload=repos.some(repo=>repo.available&&!repo.local.commit&&!['empty','conflict'].includes(repo.local.status));
     const updates=state.update_count||0;
     const actions=button('Download all','download_all','',repositoryBusy||!canDownload)+button('Update All ('+U.count(updates)+')','update_all','',repositoryBusy||!updates,!!updates);
     U.page(ctx,'Repositories','',html,actions,button('Refresh','catalog','',repositoryBusy),partial);
-    U.status(jobs.some(job=>job.kind==='catalog'||job.kind==='refresh')?'Refreshing repositories…':'Repositories loaded.');
+    U.status(jobs.some(job=>['refresh_all','catalog','refresh'].includes(job.kind))?'Refreshing repositories…':'Repositories loaded.');
     applyFilter();
     if(jobs.length||repos.some(repo=>repo.publishing||repo.build_release?.checking||U.entryRefresh.state(repo.name,repo.refresh_job).busy))pollOverview(ctx);
   }
@@ -472,7 +472,7 @@
       if(action==='cancel'){await api('jobs/'+name+'/cancel',{method:'POST',body:{}});await showJob(name);return;}
       if(action==='catalog'){
         const ctx=U.current;
-        await api('actions/catalog',{method:'POST',body:{}});
+        await api('actions/refresh_all',{method:'POST',body:{}});
         if(ctx.generation===U.generation)await refreshPage(ctx);
         return;
       }

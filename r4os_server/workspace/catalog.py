@@ -1,5 +1,6 @@
 """Public R4OSDev inventory and conservative local Git operations."""
 import json
+from datetime import datetime
 from pathlib import Path
 import shutil
 import time
@@ -60,7 +61,7 @@ def pages(context, endpoint, credential=""):
     raise RuntimeError("Too many GitHub catalogue pages; keeping the last complete inventory.")
 
 
-def refresh(context, connection_id="main"):
+def refresh(context, connection_id="main", *, inspect_local=True):
     store, found = context.store, {}
     connection = connections.get(store, connection_id)
     if connection["status"] != "ready":
@@ -122,13 +123,76 @@ def refresh(context, connection_id="main"):
         db.execute("UPDATE connections SET catalog=? WHERE id=?", (json.dumps(status), connection_id))
     if connection_id == "main":
         store.set("catalog", status)
-    for item in store.repositories(connection_id):
+    for item in store.repositories(connection_id) if inspect_local else []:
         if item["available"] and (repository_path(store, item).exists() or item["local"].get("commit")):
             inspect(context, item["name"], remote=True)
         elif item["available"]:
             from .apps import refresh as refresh_app
             refresh_app(store, item)
     return {"count": len(found), "connection_id": connection_id}
+
+
+def request_refresh_all(store):
+    with store.connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        selected=[dict(row) for row in db.execute("SELECT id,revision FROM connections WHERE status='ready' ORDER BY id")]
+        payload={'connections':selected}
+        prior=db.execute("""SELECT * FROM jobs p WHERE p.kind='refresh_all' AND
+            (p.status IN ('queued','running') OR EXISTS(SELECT 1 FROM jobs j
+             WHERE json_extract(j.payload,'$.batch_id')=p.id AND j.status IN ('queued','running')))
+            ORDER BY p.created DESC,p.rowid DESC LIMIT 1""").fetchone()
+        if prior:
+            job=store.job_record(prior)
+            if job['payload']==payload and not job['cancel']: return job
+            raise Conflict('A refresh batch is already active. Wait for it to finish.')
+        return store.enqueue('refresh_all',payload=payload,connection=db)
+
+
+def refresh_all(context):
+    from .process import Cancelled, scrub
+    store=context.store;result={'connections':[], 'jobs':[], 'skipped':[]}
+    for selected in context.job['payload']['connections']:
+        context.check()
+        try:
+            connection=connections.get(store,selected['id'])
+            if connection['revision']!=selected['revision'] or connection['status']!='ready':
+                raise Conflict('The connection changed while Refresh all was queued.')
+            refresh(context,selected['id'],inspect_local=False)
+            with store.connect() as db:
+                db.execute('BEGIN IMMEDIATE')
+                parent=db.execute('SELECT status,cancel FROM jobs WHERE id=?',(context.job['id'],)).fetchone()
+                if not parent or parent['cancel']:
+                    from .process import Cancelled
+                    raise Cancelled('Refresh all was cancelled.')
+                current=connections.get(store,selected['id'],db=db)
+                if current['revision']!=selected['revision'] or current['status']!='ready':
+                    raise Conflict('The connection changed during Refresh all.')
+                rows=db.execute('SELECT name,metadata FROM repositories WHERE connection_id=? AND enabled=1 ORDER BY name',(selected['id'],)).fetchall()
+                for row in rows:
+                    metadata=json.loads(row['metadata'])
+                    try:
+                        child=store.enqueue('refresh',row['name'],{'connection_id':selected['id'],
+                            'connection_revision':selected['revision'],'batch_id':context.job['id'],
+                            'catalog_at':metadata.get('fetched_at')},connection=db)
+                        result['jobs'].append({'repository':row['name'],'id':child['id']})
+                    except Conflict as error:
+                        result['skipped'].append({'repository':row['name'],'reason':str(error)})
+                        context.log('Refresh skipped for '+row['name']+': '+str(error))
+            result['connections'].append({'connection_id':selected['id'],'status':'completed','targets':len(rows)})
+        except Exception as error:
+            if isinstance(error,Cancelled):raise
+            context.log('Catalogue refresh failed: '+str(error))
+            detail=scrub(str(error))
+            try:
+                with store.connect() as db:
+                    db.execute('BEGIN IMMEDIATE')
+                    current=connections.get(store,selected['id'],db=db)
+                    if current['revision']==selected['revision'] and current['status']=='ready':
+                        db.execute('UPDATE connections SET catalog=? WHERE id=?',(json.dumps(dict(current['catalog'],error=detail)),selected['id']))
+            except ValueError:pass
+            result['connections'].append({'connection_id':selected['id'],'status':'failed','error':detail})
+    context.phase('Repository refresh jobs queued: '+str(len(result['jobs'])))
+    return result
 
 
 def repository_path(store, repo):
@@ -143,6 +207,32 @@ def refresh_repository(context, name, expected):
     if (expected.get('connection_id', connection['id']) != connection['id']
             or expected.get('connection_revision', connection['revision']) != connection['revision']):
         raise Conflict('The connection changed while this refresh was queued. Refresh the repository again.')
+    try:catalogue_age=time.time()-datetime.fromisoformat(repo.get('fetched_at','')).timestamp()
+    except (TypeError,ValueError):catalogue_age=999999
+    if expected.get('catalog_at') and expected.get('batch_id') and expected['catalog_at']==repo.get('fetched_at') and 0<=catalogue_age<300:
+        context.phase('Using fresh catalogue metadata: '+repo['owner']+'/'+repo['display_name'])
+        with store.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            current=connections.get(store,connection['id'],db=db)
+            if current['revision']!=connection['revision'] or current['status']!='ready':
+                raise Conflict('The connection changed during the refresh.')
+            db.execute('DELETE FROM github_release_status WHERE repository_name=?',(name,))
+    else:
+        refresh_repository_metadata(context,repo,connection)
+    context.phase('Checking the selected repository source status')
+    local = inspect(context, name, remote=True)
+    if local['status'] == 'missing':
+        from .apps import refresh as refresh_app
+        refresh_app(store, store.require_repository(name))
+    if local['status'] in ('unknown','conflict') and local.get('detail'):
+        raise RuntimeError('Repository source status could not be refreshed: '+local['detail'])
+    from .github_build import refresh as refresh_release
+    release = refresh_release(context, name, raise_network_errors=True)
+    return {'repository':name, 'local':local, 'github_release_status':release}
+
+
+def refresh_repository_metadata(context, repo, connection):
+    store, name = context.store, repo['name']
     credential = connections.token(store, connection['id'])
     context.phase('Refreshing repository metadata: '+repo['owner']+'/'+repo['display_name'])
     endpoint = 'https://api.github.com/repos/'+quote(repo['owner'], safe='')+'/'+quote(repo['display_name'], safe='')
@@ -196,16 +286,6 @@ def refresh_repository(context, name, expected):
         raise Conflict('The repository is now private. Enable it explicitly in its connection settings.')
     if not readable:
         raise ValueError(access_error)
-    context.phase('Checking the selected repository source status')
-    local = inspect(context, name, remote=True)
-    if local['status'] == 'missing':
-        from .apps import refresh as refresh_app
-        refresh_app(store, store.require_repository(name))
-    if local['status'] in ('unknown','conflict') and local.get('detail'):
-        raise RuntimeError('Repository source status could not be refreshed: '+local['detail'])
-    from .github_build import refresh as refresh_release
-    release = refresh_release(context, name, raise_network_errors=True)
-    return {'repository':name, 'local':local, 'github_release_status':release}
 
 
 def reconcile_missing(store):
