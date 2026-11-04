@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from r4os_server.workspace import apps, catalog, connections, layout, worker, app_releases, app_storage, repo_metadata
+from r4os_server.workspace import apps, catalog, connections, layout, worker, app_releases, app_storage, repo_metadata, packages
 from r4os_server.workspace.github_api import GitHubFailure
 from r4os_server.workspace.process import Context
 from r4os_server.workspace.store import Store, Conflict
@@ -28,8 +28,10 @@ class AppGitHub:
     """Published release fixture; writes or source requests fail the test."""
     target = 'MINESWEEPER_665F9DD0'
 
-    def __init__(self, repository_id=1):
+    def __init__(self, repository_id=1, target=None, format='R4X'):
         self.repository_id = repository_id
+        self.target=target or self.target;self.format=format
+        self.source_documents=None
         self.credentials, self.reads, self.downloads = [], [], []
         self.check = lambda: None
         self.during_download = lambda: None
@@ -44,10 +46,11 @@ class AppGitHub:
                         'published_at': '2026-11-04T10:00:00Z'}
         self.commit = hashlib.sha1(version.encode()).hexdigest()
         binary = b'downloaded-from-github-'+version.encode()
-        checksum = (hashlib.sha256(binary).hexdigest()+'  '+self.target+'.R4X\n').encode()
+        artifact='r4os.elf' if self.format=='ELF' else self.target+'.'+self.format
+        checksum = (hashlib.sha256(binary).hexdigest()+'  '+artifact+'\n').encode()
         self.data, self.items = {}, []
         files = []
-        for name, raw in ((self.target+'.R4X', binary), (self.target+'.sha256', checksum)):
+        for name, raw in ((artifact, binary), (self.target+'.sha256', checksum)):
             self.add(name, raw, number)
             files.append({'name': name, 'size': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()})
         receipt = {'schema': 2, 'repository_id': self.repository_id, 'target': self.target,
@@ -56,7 +59,7 @@ class AppGitHub:
         self.add('r4os-build-'+self.target+'.json', json.dumps(receipt).encode(), number)
 
     def add(self, name, raw, number):
-        key = number*100+len(self.items);self.data[key] = raw
+        key = number*1000000+int(hashlib.sha256(self.target.encode()).hexdigest()[:4],16)*10+len(self.items);self.data[key] = raw
         self.items.append({'id': key, 'name': name, 'size': len(raw), 'state': 'uploaded',
                            'digest': 'sha256:'+hashlib.sha256(raw).hexdigest(), 'updated_at': '2026-11-04T10:00:00Z'})
 
@@ -64,6 +67,16 @@ class AppGitHub:
         self.check();assert method == 'GET', 'App downloads must never mutate GitHub'
         if path == '':return {'id': self.repository_id}
         if path == '/releases/latest':return self.release
+        if path.startswith('/releases?'):return [self.release] if self.release else []
+        if path.startswith('/git/trees/'):
+            docs=self.source_documents
+            if docs is None:
+                docs={'Cargo.toml':'[package]\nname="kernel"\nversion="'+self.release['tag_name'][1:]+'"\n'} if self.format=='ELF' else {'module.R4MF':MANIFEST.replace('MINESWEEPER_665F9DD0',self.target).replace('KIND=R4X','KIND='+self.format).replace('VERSION=0.1.0','VERSION='+self.release['tag_name'][1:])+'IMAGE_SCOPE=none\n'+('TARGET=/R4OS/LIBS/'+self.target+'.R4L\n' if self.format=='R4L' else '')}
+            self.documents=list(docs.items())
+            return {'truncated':False,'tree':[{'path':name,'type':'blob','mode':'100644','sha':'fixture-'+str(index)} for index,(name,_) in enumerate(self.documents)]}
+        if path.startswith('/git/blobs/fixture-'):
+            text=self.documents[int(path.rsplit('-',1)[1])][1]
+            return {'encoding':'base64','size':len(text),'content':base64.b64encode(text.encode()).decode()}
         raise AssertionError('Unexpected app request '+path)
 
     def assets(self, release):self.check();return self.items
@@ -118,7 +131,7 @@ class AppTests(unittest.TestCase):
         staged.mkdir(parents=True)
         (staged/'GAME.R4X').write_bytes(content)
         selection = {'repository_id': repo['id'], 'release_id': release_id, 'tag': 'v0.1.0',
-                     'version': '0.1.0', 'target': 'GAME', 'commit': 'a'*40,
+                     'version': '0.1.0', 'target': AppGitHub.target, 'commit': 'a'*40,
                      'files': [{'id': 31, 'name': 'GAME.R4X', 'size': len(content),
                                 'sha256': hashlib.sha256(content).hexdigest()}]}
         return context, repo, selection, staged
@@ -152,8 +165,11 @@ class AppTests(unittest.TestCase):
 
     def test_migration_preserves_repository_data_and_defaults_to_unpublished(self):
         with self.store.connect() as db:
-            db.execute('DROP TABLE apps')
-            tables = [row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+            db.execute('''CREATE TABLE apps(repository_name TEXT PRIMARY KEY REFERENCES repositories(name) ON DELETE CASCADE,
+                       published INTEGER NOT NULL DEFAULT 0,manifest_name TEXT NOT NULL,manifest_version TEXT NOT NULL,
+                       display_name_override TEXT,install_path_override TEXT,description TEXT NOT NULL DEFAULT '',
+                       source_error TEXT NOT NULL DEFAULT '',created TEXT NOT NULL,updated TEXT NOT NULL)''')
+            tables = [row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name<>'apps'")]
             before = {name: [tuple(row) for row in db.execute('SELECT * FROM '+name+' ORDER BY rowid')] for name in tables}
         migrated = Store(self.store.root)
         with migrated.connect() as db:
@@ -172,7 +188,7 @@ class AppTests(unittest.TestCase):
         edited = apps.save(self.store, 'minesweeper', self.settings(display_name='Minesweeper', install_path='D:/Games/Mines', description='A game.\nSecond line.'))
         self.assertEqual(edited['install_path'], 'D:\\Games\\Mines')
         source = layout.repository_path(self.store, self.store.repository('minesweeper'))/'module.R4MF'
-        source.write_text(MANIFEST.replace('MINESWEEPER_665F9DD0', 'NEW_MODULE').replace('0.1.0', '0.2.0'))
+        source.write_text(MANIFEST.replace('0.1.0', '0.2.0'))
         apps.refresh(self.store, self.store.repository('minesweeper'))
         apps.publish(self.store, 'minesweeper', {'published': False})
         self.assertEqual(apps.overview(self.store), [])
@@ -180,9 +196,9 @@ class AppTests(unittest.TestCase):
         restored = apps.get(Store(self.store.root), 'minesweeper')
         self.assertEqual((restored['display_name'], restored['install_path'], restored['description']),
                          ('Minesweeper', 'D:\\Games\\Mines', 'A game.\nSecond line.'))
-        self.assertEqual(restored['default_display_name'], 'NEW_MODULE')
+        self.assertEqual(restored['default_display_name'], AppGitHub.target)
         reset = apps.save(self.store, 'minesweeper', self.settings())
-        self.assertEqual((reset['display_name'], reset['install_path'], reset['description']), ('NEW_MODULE', 'C:\\Software\\NEW_MODULE', ''))
+        self.assertEqual((reset['display_name'], reset['install_path'], reset['description']), (AppGitHub.target, 'C:\\Software\\'+AppGitHub.target, ''))
 
     def test_private_manifest_uses_only_its_connection_and_rejects_stale_connection(self):
         conn = connections.save(self.store, {'url': 'https://github.com/R4mboX', 'token': 'fake-app-source-token'})
@@ -504,3 +520,54 @@ class AppTests(unittest.TestCase):
             self.assertEqual(self.store.repository('minesweeper')['server_metadata']['category'], 'App')
         apps.refresh(self.store, self.store.repository('minesweeper'))
         self.assertEqual(apps.get(self.store, 'minesweeper')['category'], 'App')
+
+    def test_library_and_kernel_use_release_types_and_explicit_runtime_roles(self):
+        for number,kind,target,slug in [(2,'R4L','R4IMG','r4os-libraries'),(3,'ELF','kernel','r4os-kernel')]:
+            name='typed-'+str(number);repo=self.seed(name,number)
+            root=layout.repository_path(self.store,repo);(root/'module.R4MF').unlink()
+            with self.store.connect() as db:
+                data=json.loads(db.execute('SELECT metadata FROM repositories WHERE name=?',(name,)).fetchone()[0]);data['display_name']=slug
+                db.execute('UPDATE repositories SET metadata=? WHERE name=?',(json.dumps(data),name))
+            if kind=='R4L':
+                folder=root/target;folder.mkdir();(folder/'module.R4MF').write_text(MANIFEST.replace(AppGitHub.target,target).replace('KIND=R4X','KIND=R4L')+'TARGET=/R4OS/LIBS/'+target+'.R4L\nIMAGE_SCOPE=none\n')
+            else:(root/'Cargo.toml').write_text('[package]\nname="kernel"\nversion="0.1.0"\n')
+            apps.publish(self.store,name,{'published':True})
+            with self.store.connect() as db:item=db.execute('SELECT repository_name FROM software_packages WHERE source_repository=?',(name,)).fetchone()[0]
+            fake=AppGitHub(number,target,kind)
+            with patch.object(app_releases,'Client',side_effect=fake.factory):
+                job=app_releases.request(self.store,item,'refresh');self.store.change_job(job['id'],status='running')
+                app_releases.refresh(Context(self.store,self.store.job(job['id'])),self.store.repository(name));self.store.change_job(job['id'],status='completed')
+                job=app_releases.request(self.store,item,'download');worker.once(self.store)
+            self.assertEqual(self.store.job(job['id'])['status'],'completed',self.store.job(job['id'])['error'])
+            value=apps.get(self.store,item);self.assertEqual(value['package_type'],'library' if kind=='R4L' else 'kernel')
+            self.assertEqual(value['format'],kind)
+            self.assertEqual(value['default_install_path'],'/R4OS/LIBS/R4IMG.R4L' if kind=='R4L' else None)
+            local=value['release']['local'];self.assertEqual(local['package']['artifact_name'],'R4IMG.R4L' if kind=='R4L' else 'r4os.elf')
+
+    def test_multiple_library_targets_share_release_without_sharing_publication_or_removal(self):
+        name='library-set';repo=self.seed(name,2);root=layout.repository_path(self.store,repo);(root/'module.R4MF').unlink();documents={}
+        for target in ('LIBA','LIBB'):
+            text=MANIFEST.replace(AppGitHub.target,target).replace('KIND=R4X','KIND=R4L')+'TARGET=/R4OS/LIBS/'+target+'.R4L\nIMAGE_SCOPE=none\n'
+            folder=root/target;folder.mkdir();(folder/'module.R4MF').write_text(text);documents[target+'/module.R4MF']=text
+        with self.assertRaises(Conflict):apps.publish(self.store,name,{'published':True})
+        apps.publish(self.store,name,{'published':True,'targets':['LIBA']})
+        self.assertEqual([item['target'] for item in apps.overview(self.store)],['LIBA'])
+        apps.publish(self.store,name,{'published':True,'targets':['LIBA','LIBB']})
+        fake=AppGitHub(2,'LIBA','R4L');second=AppGitHub(2,'LIBB','R4L')
+        fake.data.update(second.data);fake.items+=second.items;fake.source_documents=documents
+        items=apps.overview(self.store)
+        self.assertEqual(len({item['package_id'] for item in items}),2)
+        with patch.object(app_releases,'Client',side_effect=fake.factory):
+            for item in items:
+                job=app_releases.request(self.store,item['repository'],'refresh');self.store.change_job(job['id'],status='running')
+                app_releases.refresh(Context(self.store,self.store.job(job['id'])),self.store.repository(name));self.store.change_job(job['id'],status='completed')
+            jobs=[app_releases.request(self.store,item['repository'],'download') for item in items]
+            for _ in jobs:worker.once(self.store)
+        self.assertTrue(all(self.store.job(job['id'])['status']=='completed' for job in jobs))
+        first,second=sorted(items,key=lambda item:item['target'])
+        job=app_releases.request(self.store,first['repository'],'remove_local');worker.once(self.store)
+        self.assertEqual(self.store.job(job['id'])['status'],'completed')
+        self.assertIsNone(app_storage.current(self.store,first['repository']))
+        self.assertTrue(app_storage.current(self.store,second['repository'],hashes=True)['valid'])
+        folder=app_storage.path(self.store,'Apps/2/Releases/11')
+        self.assertFalse((folder/'LIBA.R4L').exists());self.assertTrue((folder/'LIBB.R4L').exists())

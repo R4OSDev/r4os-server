@@ -20,7 +20,7 @@
   }
   function entry(app,value){
     const release=app.release||{},job=release.job||app.refresh_job;
-    const related=(value.active_jobs||[]).find(item=>U.repositoryActions.includes(item.kind)&&U.affectsRepository(item,{name:app.repository,connection_id:app.connection_id}));
+    const related=(value.active_jobs||[]).find(item=>U.repositoryActions.includes(item.kind)&&(!item.payload?.package_key||item.payload.package_key===app.repository)&&U.affectsRepository(item,{name:app.source_repository||app.repository,connection_id:app.connection_id}));
     const own=active(job)?job:related;
     const refreshing=own?.kind==='refresh'||own?.kind==='app_refresh';
     const feedback=U.entryRefresh.state(app.repository,refreshing||job?.kind==='app_refresh'||job?.kind==='refresh'?job:app.refresh_job);
@@ -48,10 +48,10 @@
       const progress=busy&&job?.result?.progress,percent=Number(progress?.percent),known=progress?.percent!==null&&progress?.percent!==undefined&&Number.isFinite(percent);
       const releaseLink=release.available?.url||release.local?.url;
       const content='<div class="record-grid app-overview-grid"><div class="record-identity"><h2 class="record-name app-name">'+E(app.display_name)+'</h2><span class="record-subline app-version">'+E(versions)+'</span>'+newer+
-        '<div class="app-release-status"><span class="badge app-release-badge" data-release-state="'+E(release.state||'unknown')+'">'+E(status)+'</span><span class="badge app-category" title="Category">'+E(app.category||'Undefined')+'</span></div>'+
+        '<div class="app-release-status"><span class="badge app-release-badge" data-release-state="'+E(release.state||'unknown')+'">'+E(status)+'</span><span class="badge app-category" title="Category">'+E(app.category||'Undefined')+'</span><span class="badge app-package-type">'+E(({application:'Application',library:'Library',kernel:'Kernel'})[app.package_type]||'Application')+(app.format?' · '+E(app.format):'')+'</span></div>'+
         (app.description?'<p class="app-description">'+E(app.description)+'</p>':'')+
         (progress?'<progress class="app-progress" max="100"'+(known?' value="'+Math.min(100,Math.max(0,percent))+'"':'')+' aria-label="App download progress"></progress>':'')+'</div>'+
-        '<div role="group" aria-label="Install-Path"><span class="app-install-path">'+E(app.install_path)+'</span></div>'+
+        '<div role="group" aria-label="Install-Path"><span class="app-install-path">'+E(app.install_path||(app.package_type==='kernel'?'Boot configuration required':'Runtime target unavailable'))+'</span></div>'+
         '<div role="group" aria-label="Source">'+E(app.owner)+'<small class="cell-subline">'+E(app.repository_name)+'</small></div><span class="badge app-visibility" title="Source repository visibility">'+(app.private?'Private':'Public')+'</span></div>';
       const actions=refresh+button(transfer,name,transferLabel,busy||!release['can_'+transfer],reason||(transfer==='update'?'Download the newer published release.':'Download the published GitHub release.'),transferring)+
         button('remove_local',name,busy&&action==='remove_local'?'Removing…':'Remove local files',busy||!release.can_remove,busy?reason:release.can_remove?'Remove this app’s downloaded releases.':'No local app files are available.',busy&&action==='remove_local')+
@@ -81,7 +81,7 @@
       if(lastValue){
         const jobs=value.jobs||[value];
         for(const job of jobs){
-          const app=lastValue.apps.find(item=>item.repository===job.subject);if(app?.release)app.release.job=job;
+          const app=lastValue.apps.find(item=>item.repository===(job.payload?.package_key||job.subject));if(app?.release)app.release.job=job;
           lastValue.active_jobs=[...(lastValue.active_jobs||[]).filter(item=>item.id!==job.id),job];
         }
       }
@@ -96,7 +96,7 @@
     const ctx=U.current;if(ctx?.view!=='apps')return;
     const {name,phase,job}=event.detail;
     if(lastValue&&overviewGeneration===ctx.generation&&job){
-      const app=lastValue.apps.find(item=>item.repository===name);if(app){app.refresh_job=job;if(app.release)app.release.job=job;}
+      for(const app of lastValue.apps.filter(item=>(item.source_repository||item.repository)===name)){app.refresh_job=job;if(app.release)app.release.job=job;}
       lastValue.active_jobs=[...(lastValue.active_jobs||[]).filter(item=>item.id!==job.id),job].filter(item=>active(item));
     }
     redraw();if(phase==='submitted'||phase==='error')loadOverview(ctx,true).catch(error=>U.status(error.message,true));
@@ -111,7 +111,7 @@
       editing=app;
       U.open('Edit '+app.display_name,'<form id="app-settings" class="stack-form" data-repository="'+E(app.repository)+'"><p class="muted">'+E(app.owner)+' / '+E(app.repository_name)+'</p>'+
         '<label>Display-Name<input name="display_name" maxlength="128" value="'+E(app.display_name)+'" placeholder="'+E(app.default_display_name)+'"><small class="muted">Default: '+E(app.default_display_name)+'. Clear this field to use the manifest name.</small></label>'+
-        '<label>Install-Path<input name="install_path" maxlength="240" spellcheck="false" value="'+E(app.install_path)+'" placeholder="'+E(app.default_install_path)+'"><small class="muted">Default: '+E(app.default_install_path)+'. Clear this field to use the default path.</small></label>'+
+        '<label>Install-Path<input name="install_path" maxlength="240" spellcheck="false" value="'+E(app.install_path)+'" placeholder="'+E(app.default_install_path||'Defined by the client boot configuration')+'"><small class="muted">'+E(app.default_install_path?'Default: '+app.default_install_path+'. Clear this field to use the default path.':'The kernel requires a compatible client boot and activation plan.')+'</small></label>'+
         '<label>Description<textarea name="description" rows="6" maxlength="8192">'+E(app.description)+'</textarea></label>'+
         '<label>Category<select name="category">'+(lastValue?.categories||[]).map(item=>'<option value="'+E(item)+'"'+(item===app.category?' selected':'')+'>'+E(item)+'</option>').join('')+'</select><small class="muted">Shared with the source repository.</small></label>'+
         '<div class="form-actions"><button type="submit" class="button primary">Save</button><button type="button" class="button subtle" data-action="close-dialog">Cancel</button></div><p class="form-message" role="alert"></p></form>');

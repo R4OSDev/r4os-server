@@ -94,7 +94,7 @@
       const buildReason=startingBuild?'Starting the build…':building?'Build and GitHub upload in progress.':repo.build_release?.reason||'Checking build readiness…';
       const buildDisabled=!repo.build_release?.enabled||busy;
       const buildAction='<span class="build-action" title="'+E(buildReason)+'" role="group" aria-label="'+E('Build status: '+buildReason)+'"'+(buildDisabled?' tabindex="0"':'')+'>'+button(startingBuild?'Starting…':building?'Building…':'Build','build_publish',repo.name,buildDisabled,false,buildReason,'',startingBuild||building)+'</span>';
-      const actions=refreshAction+sourceAction+buildAction+button('Edit','edit',repo.name)+'<label class="repository-publish"><input type="checkbox" data-repository-publish="'+E(repo.name)+'" title="Show in Apps" aria-label="Show in Apps '+E(repo.display_name||repo.name)+'"'+(repo.published||repo.publishing?' checked':'')+((busy&&!repo.publishing)||(!repo.available&&!repo.published&&!repo.publishing)?' disabled':'')+'>Show in Apps'+(repo.publishing?'…':'')+'</label>'+(repo.publish_error?'<p class="form-message" role="alert">'+E(repo.publish_error)+'</p>':'')+(buildErrors.has(repo.name)?'<p class="form-message" role="alert">'+E('Build could not start: '+buildErrors.get(repo.name))+'</p>':'')+(feedback.error?'<div class="repository-refresh-message" role="alert"><span>'+E('Refresh failed: '+feedback.error)+'</span>'+(feedback.log?button('Log','job',feedback.log):'')+'</div>':'');
+      const actions=refreshAction+sourceAction+buildAction+button('Edit','edit',repo.name)+((repo.local?.modules||[]).some(m=>m.kind==='R4L'||m.id==='kernel')?button('Packages','packages',repo.name,busy):'')+'<label class="repository-publish"><input type="checkbox" data-repository-publish="'+E(repo.name)+'" title="Show in Apps" aria-label="Show in Apps '+E(repo.display_name||repo.name)+'"'+(repo.published||repo.publishing?' checked':'')+((busy&&!repo.publishing)||(!repo.available&&!repo.published&&!repo.publishing)?' disabled':'')+'>Show in Apps'+(repo.publishing?'…':'')+'</label>'+(repo.publish_error?'<p class="form-message" role="alert">'+E(repo.publish_error)+'</p>':'')+(buildErrors.has(repo.name)?'<p class="form-message" role="alert">'+E('Build could not start: '+buildErrors.get(repo.name))+'</p>':'')+(feedback.error?'<div class="repository-refresh-message" role="alert"><span>'+E('Refresh failed: '+feedback.error)+'</span>'+(feedback.log?button('Log','job',feedback.log):'')+'</div>':'');
       return U.record(content,actions,' data-record-key="'+E(repo.name)+'" aria-busy="'+refreshing+'" data-repo-search="'+E(repositorySearch(repo))+'" data-category="'+E(classification)+'" data-account="'+E((repo.owner||'').toLowerCase())+'"'+(repositoryMatches(repo)?'':' hidden'),'repository-entry'+(refreshing?' is-refreshing':''));
     }),'Repository overview')+'</div><div id="repository-filter-empty"'+(matching?' hidden':'')+'>'+U.empty('No matching repositories','Choose another category or change the search.')+'</div>':U.empty('No catalogue yet','Connect an account and enable its repositories in Connections.');
     html+='</section>';
@@ -439,10 +439,21 @@
       const build=document.querySelector('#release-build button[type="submit"]');if(build)build.disabled=true;
     }
   });
+  function packageSelection(name,value){
+    U.open('Software packages','<form id="software-package-selection" class="stack-form" data-name="'+E(name)+'"><p class="muted">Choose the production packages to show in Apps.</p>'+value.targets.map(item=>'<label class="toggle-control"><input type="checkbox" name="target" value="'+E(item.id)+'"'+(item.selected?' checked':'')+'><span>'+E(item.name)+'<small class="cell-subline">'+E(item.package_type+' · '+item.format+' · '+(item.version||'Version unavailable'))+'</small></span></label>').join('')+'<div class="form-actions"><button type="submit" class="button primary">Save</button><button type="button" class="button subtle" data-action="close-dialog">Cancel</button></div><p class="form-message" role="alert"></p></form>');
+  }
+  document.addEventListener('submit',async event=>{
+    const form=event.target;if(form.id!=='software-package-selection')return;
+    event.preventDefault();const submit=form.querySelector('[type=submit]'),ctx=U.current;submit.disabled=true;
+    try{const targets=new FormData(form).getAll('target');await api('items/'+encodeURIComponent(form.dataset.name)+'/publication',{method:'PUT',body:{published:targets.length>0,targets}});if(ctx.generation===U.generation){form.closest('dialog').close();await loadOverview(ctx,true);}U.status('Software package selection saved.');}
+    catch(error){if(form.isConnected)form.querySelector('.form-message').textContent=error.message;}
+    finally{if(submit.isConnected)submit.disabled=false;}
+  });
   document.addEventListener('change',async event=>{
     const checkbox=event.target;if(!checkbox.matches('[data-repository-publish]'))return;
     const selected=checkbox.checked,ctx=U.current;checkbox.disabled=true;checkbox.dataset.pending='true';
     try{
+      if(selected){const value=await U.api('apps/targets/'+encodeURIComponent(checkbox.dataset.repositoryPublish));if(ctx.generation!==U.generation)return;if(value.targets.length>1){checkbox.checked=!!lastState?.repositories.find(item=>item.name===checkbox.dataset.repositoryPublish)?.published;packageSelection(checkbox.dataset.repositoryPublish,value);return;}}
       const repo=await api('items/'+encodeURIComponent(checkbox.dataset.repositoryPublish)+'/publication',{method:'PUT',body:{published:selected}});
       if(checkbox.isConnected)checkbox.checked=repo.published||repo.publishing;
       const cached=lastState?.repositories.find(item=>item.name===repo.name);if(cached)Object.assign(cached,{published:repo.published,publishing:repo.publishing});
@@ -469,6 +480,7 @@
     const action=node.dataset.repoAction,name=node.dataset.name;
     if(action==='test_file_add'){document.querySelector('#test-files').insertAdjacentHTML('beforeend',testFileRow());return;}
     if(action==='test_file_remove'){node.closest('.test-file-row').remove();return;}
+    if(action==='packages'){try{const value=await U.api('apps/targets/'+encodeURIComponent(name));packageSelection(name,value);}catch(error){U.status(error.message,true);}return;}
     if(action==='refresh'){await U.entryRefresh.request(name);return;}
     if(action==='build_publish'){
       if(buildRequests.has(name))return;

@@ -9,9 +9,15 @@ from .store import Conflict, identifier, now
 
 
 def initialize(db):
+    # Rebind the two child tables after the one-time app -> package migration.
+    saved = {}
+    for name in ('app_release_catalog','app_release_refs'):
+        if any(row['table']=='apps' for row in db.execute('PRAGMA foreign_key_list('+name+')')):
+            saved[name]=[tuple(row) for row in db.execute('SELECT * FROM '+name)]
+            db.execute('DROP TABLE '+name)
     script = '''
         CREATE TABLE IF NOT EXISTS app_release_catalog(
-            repository_name TEXT PRIMARY KEY REFERENCES apps(repository_name) ON DELETE CASCADE,
+            repository_name TEXT PRIMARY KEY REFERENCES software_packages(repository_name) ON DELETE CASCADE,
             connection_revision INTEGER NOT NULL, status TEXT NOT NULL,
             selection TEXT NOT NULL DEFAULT '{}', error TEXT NOT NULL DEFAULT '', checked_at TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS app_releases(
@@ -20,7 +26,7 @@ def initialize(db):
             downloaded_at TEXT NOT NULL, verified_at TEXT NOT NULL,
             PRIMARY KEY(repository_id,release_id));
         CREATE TABLE IF NOT EXISTS app_release_refs(
-            repository_name TEXT NOT NULL REFERENCES apps(repository_name) ON DELETE CASCADE,
+            repository_name TEXT NOT NULL REFERENCES software_packages(repository_name) ON DELETE CASCADE,
             repository_id INTEGER NOT NULL, release_id INTEGER NOT NULL,
             current INTEGER NOT NULL DEFAULT 0 CHECK(current IN (0,1)),
             PRIMARY KEY(repository_name,repository_id,release_id),
@@ -31,6 +37,10 @@ def initialize(db):
     for statement in script.split(';'):
         if statement.strip():
             db.execute(statement)
+    for name, rows in saved.items():
+        for row in rows:
+            db.execute('INSERT INTO '+name+' VALUES('+','.join('?' for _ in row)+')',row)
+    db.execute('DROP TABLE IF EXISTS apps')
 
 
 def number(value):
@@ -72,7 +82,7 @@ def digest(file):
     return value.hexdigest()
 
 
-def verify(folder, selection, *, hashes=True):
+def verify(folder, selection, *, hashes=True, strict=False):
     files = selection.get('files')
     if not isinstance(files, list) or not files:
         raise ValueError('The app release has no verified file list.')
@@ -88,36 +98,40 @@ def verify(folder, selection, *, hashes=True):
                 or file.is_symlink() or not file.is_file() or file.stat().st_size != item['size']
                 or hashes and digest(file) != item['sha256']):
             raise ValueError('Local app files are missing or differ from their verified checksums.')
-    if {item.name.casefold() for item in folder.iterdir()} != names:
+    if strict and {item.name.casefold() for item in folder.iterdir()} != names:
         raise ValueError('The app release directory contains unexpected files.')
+
+
+def selections(value):
+    return value.get('targets', {}) if 'targets' in value else {value['target']:value}
 
 
 def current(store, name, *, hashes=False):
     with store.connect() as db:
-        row = db.execute('SELECT a.* FROM app_releases a JOIN app_release_refs r USING(repository_id,release_id) '
-                         'WHERE r.repository_name=? AND r.current=1', (name,)).fetchone()
-    if row is None:
-        return None
-    value = json.loads(row['metadata'])
-    value.update(directory=row['directory'], downloaded_at=row['downloaded_at'], verified_at=row['verified_at'],
-                 valid=bool(row['verified_at']), error='')
-    try:
-        verify(path(store, row['directory']), value, hashes=hashes)
-    except (OSError, ValueError):
-        value['valid'] = False
-    if not value['valid']:
-        value['error'] = 'Local app files are missing or damaged. Remove the local files and download again.'
+        row=db.execute('SELECT a.*,p.target FROM app_releases a JOIN app_release_refs r USING(repository_id,release_id) '
+                       'JOIN software_packages p ON p.repository_name=r.repository_name WHERE r.repository_name=? AND r.current=1',(name,)).fetchone()
+    if row is None:return None
+    document=json.loads(row['metadata']);chosen=selections(document).get(row['target'])
+    if chosen is None:return None
+    value=dict(chosen)
+    verified=document.get('verified',{}).get(row['target'],row['verified_at'])
+    value.update(directory=row['directory'],downloaded_at=row['downloaded_at'],verified_at=verified,valid=bool(verified),error='')
+    try:verify(path(store,row['directory']),value,hashes=hashes)
+    except (OSError,ValueError):value['valid']=False
+    if not value['valid']:value['error']='Local package files are missing or damaged. Remove local files and download again.'
     if hashes:
         with store.connect() as db:
-            db.execute('UPDATE app_releases SET verified_at=? WHERE repository_id=? AND release_id=?',
-                       (now() if value['valid'] else '', row['repository_id'], row['release_id']))
+            latest=db.execute('SELECT metadata FROM app_releases WHERE repository_id=? AND release_id=?',(row['repository_id'],row['release_id'])).fetchone()
+            data=json.loads(latest['metadata']);updated={'targets':selections(data),'verified':data.get('verified',{})}
+            updated['verified'][row['target']]=now() if value['valid'] else ''
+            db.execute('UPDATE app_releases SET metadata=? WHERE repository_id=? AND release_id=?',(json.dumps(updated),row['repository_id'],row['release_id']))
     return value
 
 
 def bind(db, repo, revision, job_id=None):
-    row = db.execute('SELECT a.published,r.github_id,r.enabled,c.status,c.revision FROM apps a '
-                     'JOIN repositories r ON r.name=a.repository_name JOIN connections c ON c.id=r.connection_id '
-                     'WHERE a.repository_name=?', (repo['name'],)).fetchone()
+    row = db.execute('SELECT a.published,r.github_id,r.enabled,c.status,c.revision FROM software_packages a '
+                     'JOIN repositories r ON r.name=a.source_repository JOIN connections c ON c.id=r.connection_id '
+                     'WHERE a.repository_name=?', (repo.get('package_key',repo['name']),)).fetchone()
     if (not row or not row['published'] or not row['enabled'] or row['status'] != 'ready'
             or row['revision'] != revision or row['github_id'] != repo['id']):
         raise Conflict('The app or its connection changed. Refresh the app and try again.')
@@ -129,71 +143,66 @@ def bind(db, repo, revision, job_id=None):
 
 
 def install(context, repo, revision, selection, staged):
-    """Rename verified files first; only then commit a usable app reference."""
-    store = context.store
-    if selection['repository_id'] != repo['id']:
-        raise Conflict('The release belongs to a different repository.')
-    relative = directory(repo['id'], selection['release_id'])
-    destination = path(store, relative)
-    verify(staged, selection)
-    context.check()
+    """Expose a complete target only after all immutable release assets exist."""
+    store=context.store;item=repo.get('package_key',repo['name'])
+    if selection['repository_id']!=repo['id']:raise Conflict('The release belongs to another repository.')
+    relative=directory(repo['id'],selection['release_id']);destination=path(store,relative)
+    verify(staged,selection);context.check()
     with store.connect() as db:
-        db.execute('BEGIN IMMEDIATE')
-        bind(db, repo, revision, context.job['id'])
-        old = db.execute('SELECT metadata FROM app_releases WHERE repository_id=? AND release_id=?',
-                         (repo['id'], selection['release_id'])).fetchone()
-        immutable = lambda value: {key:value for key,value in value.items() if key not in ('url','published_at')}
-        if old and immutable(json.loads(old['metadata'])) != immutable(selection):
-            raise Conflict('This release ID already has different local assets. Remove the local files before retrying.')
-        if destination.exists():
-            verify(destination, selection)
-        else:
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            staged.rename(destination)
-        timestamp = now()
-        db.execute('INSERT INTO app_releases VALUES(?,?,?,?,?,?) ON CONFLICT(repository_id,release_id) '
-                   'DO UPDATE SET verified_at=excluded.verified_at',
-                   (repo['id'], selection['release_id'], json.dumps(selection), relative, timestamp, timestamp))
-        db.execute('UPDATE app_release_refs SET current=0 WHERE repository_name=?', (repo['name'],))
-        db.execute('INSERT INTO app_release_refs VALUES(?,?,?,1) ON CONFLICT(repository_name,repository_id,release_id) '
-                   'DO UPDATE SET current=1', (repo['name'], repo['id'], selection['release_id']))
-        result = {'activation_committed': True, 'release': selection, 'directory': relative}
-        db.execute('UPDATE jobs SET result=? WHERE id=?', (json.dumps(result), context.job['id']))
-    context.activation_committed = True
+        db.execute('BEGIN IMMEDIATE');bind(db,repo,revision,context.job['id'])
+        row=db.execute('SELECT metadata FROM app_releases WHERE repository_id=? AND release_id=?',(repo['id'],selection['release_id'])).fetchone()
+        document=json.loads(row['metadata']) if row else {'targets':{},'verified':{}}
+        targets=selections(document);old=targets.get(selection['target'])
+        immutable=lambda data:{k:data[k] for k in ('repository_id','release_id','target','version','tag','commit','files')}
+        if old and immutable(old)!=immutable(selection):raise Conflict('This release target already has different local assets. Remove local files before retrying.')
+        destination.mkdir(parents=True,exist_ok=True)
+        for asset in selection['files']:
+            file=destination/filename(asset['name'])
+            if file.exists():
+                if file.is_symlink() or not file.is_file() or file.stat().st_size!=asset['size'] or digest(file)!=asset['sha256']:
+                    raise Conflict('A local release filename belongs to different bytes. No file was overwritten.')
+            else:(staged/asset['name']).rename(file)
+        timestamp=now();targets[selection['target']]=selection
+        verified=document.get('verified',{});verified[selection['target']]=timestamp
+        db.execute('INSERT INTO app_releases VALUES(?,?,?,?,?,?) ON CONFLICT(repository_id,release_id) DO UPDATE SET metadata=excluded.metadata,verified_at=excluded.verified_at',
+                   (repo['id'],selection['release_id'],json.dumps({'targets':targets,'verified':verified}),relative,timestamp,timestamp))
+        db.execute('UPDATE app_release_refs SET current=0 WHERE repository_name=?',(item,))
+        db.execute('INSERT INTO app_release_refs VALUES(?,?,?,1) ON CONFLICT(repository_name,repository_id,release_id) DO UPDATE SET current=1',(item,repo['id'],selection['release_id']))
+        result={'activation_committed':True,'release':selection,'directory':relative}
+        db.execute('UPDATE jobs SET result=? WHERE id=?',(json.dumps(result),context.job['id']))
+    context.activation_committed=True
     return result
 
 
 def remove(store, names, *, context=None, repo=None, revision=None):
-    """Unlink app references, preserving releases used by another connection."""
-    if not names:
-        return {'removed_releases': 0}
-    removed = 0
+    if not names:return {'removed_releases':0}
+    removed=0
     with store.connect() as db:
         db.execute('BEGIN IMMEDIATE')
-        if context and repo:
-            bind(db, repo, revision, context.job['id'])
-        marks = ','.join('?' for _ in names)
-        rows = db.execute('SELECT DISTINCT a.* FROM app_releases a JOIN app_release_refs r USING(repository_id,release_id) '
-                          'WHERE r.repository_name IN ('+marks+')', tuple(names)).fetchall()
+        if context and repo:bind(db,repo,revision,context.job['id'])
+        marks=','.join('?' for _ in names)
+        rows=db.execute('SELECT DISTINCT a.* FROM app_releases a JOIN app_release_refs r USING(repository_id,release_id) WHERE r.repository_name IN ('+marks+')',tuple(names)).fetchall()
+        db.execute('DELETE FROM app_release_refs WHERE repository_name IN ('+marks+')',tuple(names))
         for row in rows:
-            other = db.execute('SELECT 1 FROM app_release_refs WHERE repository_id=? AND release_id=? '
-                               'AND repository_name NOT IN ('+marks+') LIMIT 1',
-                               (row['repository_id'], row['release_id'], *names)).fetchone()
-            if not other:
-                folder = path(store, directory(row['repository_id'], row['release_id']))
-                if folder.exists():
-                    shutil.rmtree(folder)
-                removed += 1
-        db.execute('DELETE FROM app_release_refs WHERE repository_name IN ('+marks+')', tuple(names))
-        for row in rows:
-            db.execute('DELETE FROM app_releases WHERE repository_id=? AND release_id=? AND NOT EXISTS('
-                       'SELECT 1 FROM app_release_refs r WHERE r.repository_id=? AND r.release_id=?)',
-                       (row['repository_id'], row['release_id'], row['repository_id'], row['release_id']))
-        result = {'activation_committed': True, 'removed_releases': removed}
-        if context and repo:
-            db.execute('UPDATE jobs SET result=? WHERE id=?', (json.dumps(result), context.job['id']))
-    if context and repo:
-        context.activation_committed = True
+            keep={r['target'] for r in db.execute('SELECT p.target FROM app_release_refs r JOIN software_packages p ON p.repository_name=r.repository_name WHERE r.repository_id=? AND r.release_id=?',(row['repository_id'],row['release_id']))}
+            folder=path(store,directory(row['repository_id'],row['release_id']))
+            document=json.loads(row['metadata']);targets=selections(document)
+            if not keep:
+                if folder.exists():shutil.rmtree(folder)
+                db.execute('DELETE FROM app_releases WHERE repository_id=? AND release_id=?',(row['repository_id'],row['release_id']));removed+=1
+            else:
+                needed={file['name'] for target,data in targets.items() if target in keep for file in data['files']}
+                for target,data in list(targets.items()):
+                    if target in keep:continue
+                    for file in data['files']:
+                        if file['name'] not in needed:
+                            candidate=path(store,row['directory']+'/'+filename(file['name']));candidate.unlink(missing_ok=True)
+                    del targets[target]
+                document={'targets':targets,'verified':{k:v for k,v in document.get('verified',{}).items() if k in keep}}
+                db.execute('UPDATE app_releases SET metadata=? WHERE repository_id=? AND release_id=?',(json.dumps(document),row['repository_id'],row['release_id']))
+        result={'activation_committed':True,'removed_releases':removed}
+        if context and repo:db.execute('UPDATE jobs SET result=? WHERE id=?',(json.dumps(result),context.job['id']))
+    if context and repo:context.activation_committed=True
     return result
 
 

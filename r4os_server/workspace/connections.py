@@ -365,14 +365,16 @@ def remove(context):
             folder.rmdir()
         context.phase("Removing connection and credentials")
         from .app_storage import remove as remove_app_files, remove_orphans
-        remove_app_files(store, names)
+        with store.connect() as db:
+            package_keys={row[0] for row in db.execute('SELECT repository_name FROM software_packages WHERE source_repository IN ('+','.join('?' for _ in names)+')',tuple(names))} if names else set()
+        remove_app_files(store, package_keys)
         remove_orphans(store, repos, names)
         write_token(store, key, "")
         with store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             for name in names:
                 db.execute("DELETE FROM imports WHERE name=?", (name,))
-                db.execute("DELETE FROM apps WHERE repository_name=?", (name,))
+                db.execute("DELETE FROM software_packages WHERE source_repository=?", (name,))
             db.execute("DELETE FROM repositories WHERE connection_id=?", (key,))
             db.execute("DELETE FROM connections WHERE id=?", (key,))
         # Release/test references intentionally remain explicit missing sources;

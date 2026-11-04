@@ -14,7 +14,7 @@ FOLDERS = ("Repositories", "BuildTools", "Artifacts", "Release", "Apps")
 REPOSITORY_ACTIONS = ('refresh','refresh_all','catalog','check','download','update','download_all','update_all','build','build_publish','app_publish','connection_delete',
                       'app_refresh','app_download','app_update','app_remove_local')
 REPOSITORY_FIELDS = ("r.*,c.status AS connection_status,c.revision AS connection_revision,c.has_token AS connection_has_token,c.catalog AS connection_catalog,"
-                     "COALESCE((SELECT published FROM apps WHERE repository_name=r.name),0) AS app_published,"
+                     "EXISTS(SELECT 1 FROM software_packages WHERE source_repository=r.name AND published=1) AS app_published,"
                      "EXISTS(SELECT 1 FROM jobs WHERE kind='app_publish' AND subject=r.name AND status IN ('queued','running') AND cancel=0) AS app_publishing,"
                      "(SELECT CASE WHEN status='failed' THEN error ELSE '' END FROM jobs WHERE kind='app_publish' AND subject=r.name ORDER BY created DESC,rowid DESC LIMIT 1) AS app_publish_error,"
                      "(SELECT json_object('id',id,'status',status,'phase',phase,'error',error,'finished',finished) FROM jobs WHERE kind='refresh' AND subject=r.name ORDER BY created DESC,rowid DESC LIMIT 1) AS refresh_job")
@@ -285,6 +285,9 @@ class Store:
                     raise Conflict("This connection is being deleted. New jobs cannot use its repositories.")
         query = "SELECT * FROM jobs WHERE kind=? AND subject=? AND status IN ('queued','running')"
         arguments = [kind, subject]
+        if kind in ('app_refresh','app_download','app_update','app_remove_local'):
+            query += " AND COALESCE(json_extract(payload,'$.package_key'),'')=?"
+            arguments.append(payload.get('package_key',''))
         if kind in ("app_publish", "github_status", "build_publish"):
             query += " AND cancel=0"
         if kind in ("catalog", "download_all", "update_all", "check"):
