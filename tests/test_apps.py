@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from r4os_server.workspace import apps, catalog, connections, layout, worker, app_releases, app_storage
+from r4os_server.workspace import apps, catalog, connections, layout, worker, app_releases, app_storage, repo_metadata
 from r4os_server.workspace.github_api import GitHubFailure
 from r4os_server.workspace.process import Context
 from r4os_server.workspace.store import Store, Conflict
@@ -288,7 +288,7 @@ class AppTests(unittest.TestCase):
             response = connection.getresponse();raw = response.read();connection.close()
             return response.status, json.loads(raw) if raw else None
         try:
-            self.assertEqual(request('/api/apps/overview')[1], {'apps': [], 'publishing': 0, 'active_jobs': []})
+            self.assertEqual(request('/api/apps/overview')[1], {'apps': [], 'publishing': 0, 'active_jobs': [], 'categories': list(repo_metadata.CATEGORIES)})
             route = '/api/repositories/items/minesweeper/publication'
             self.assertEqual(request(route, 'PUT', {'published': True})[0], 403)
             self.assertEqual(request(route, 'PUT', {'published': True}, {'Origin': 'https://other.invalid'})[0], 403)
@@ -302,6 +302,9 @@ class AppTests(unittest.TestCase):
             self.assertEqual(saved['install_path'], 'C:\\Software\\MINESWEEPER_665F9DD0')
             self.assertEqual(request('/api/apps/overview')[1]['apps'][0]['description'], '<b>Literal text</b>')
             self.assertEqual(request('/api/apps/items/minesweeper', 'PUT', self.settings(install_path='../bad'), headers)[0], 422)
+            status, saved = request('/api/apps/items/minesweeper', 'PUT', dict(value,category='Game'), headers)
+            self.assertEqual(status, 200);self.assertEqual(saved['category'], 'Game')
+            self.assertEqual(self.store.repository('minesweeper')['server_metadata']['category'], 'Game')
             status, job = request('/api/repositories/actions/refresh', 'POST', {'name': 'minesweeper'}, headers)
             self.assertEqual(status, 202)
             overview = request('/api/apps/overview')[1]
@@ -381,6 +384,7 @@ class AppTests(unittest.TestCase):
 
     def test_github_app_download_uses_published_release_without_checkout_or_build_files(self):
         fake = self.remote_app()
+        repo_metadata.save(self.store, 'minesweeper', {'category': 'Game'})
         self.assertTrue(all(name.endswith('.json') for name in fake.reads))
         self.assertEqual(fake.downloads, [])
         apps.save(self.store, 'minesweeper', self.settings(display_name='Friendly', description='Preserve this'))
@@ -397,6 +401,7 @@ class AppTests(unittest.TestCase):
         self.assertFalse((self.store.root/'Artifacts').exists())
         self.assertTrue(all(token == '' for _, token in fake.credentials))
         self.assertFalse(value['release']['can_download']);self.assertFalse(value['release']['can_update'])
+        self.assertEqual(value['category'], 'Game')
 
     def test_app_update_keeps_previous_release_and_only_updates_newer_available_versions(self):
         fake = self.remote_app();self.assertEqual(self.download_release()['status'], 'completed')
@@ -483,3 +488,19 @@ class AppTests(unittest.TestCase):
         self.assertTrue(all(token == 'fake-app-read-token' for _, token in fake.credentials))
         self.assertIsNone(app_storage.current(self.store, 'private-game'))
         self.assertFalse(app_storage.path(self.store, 'Apps/.staging/'+job['id']).exists())
+
+    def test_app_and_repository_share_category_and_invalid_combined_edits_are_atomic(self):
+        apps.publish(self.store, 'minesweeper', {'published': True})
+        self.assertEqual(apps.get(self.store, 'minesweeper')['category'], 'Undefined')
+        repo_metadata.save(self.store, 'minesweeper', {'category':'Game'})
+        self.assertEqual(apps.get(self.store, 'minesweeper')['category'], 'Game')
+        saved = apps.save(self.store, 'minesweeper', dict(self.settings(display_name='Friendly',description='Keep'),category='App'))
+        self.assertEqual(saved['category'], 'App')
+        self.assertEqual(self.store.repository('minesweeper')['server_metadata']['category'], 'App')
+        for value in (dict(self.settings(display_name='Changed'),category='Unknown category'),
+                      dict(self.settings(install_path='../bad'),category='Service')):
+            with self.assertRaises(ValueError):apps.save(self.store, 'minesweeper', value)
+            self.assertEqual(apps.get(self.store, 'minesweeper'), saved)
+            self.assertEqual(self.store.repository('minesweeper')['server_metadata']['category'], 'App')
+        apps.refresh(self.store, self.store.repository('minesweeper'))
+        self.assertEqual(apps.get(self.store, 'minesweeper')['category'], 'App')

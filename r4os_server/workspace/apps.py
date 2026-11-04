@@ -5,7 +5,7 @@ import json
 import re
 from urllib.parse import quote
 
-from . import connections, layout
+from . import connections, layout, repo_metadata
 from .store import Conflict, identifier, now, under
 
 
@@ -108,6 +108,7 @@ def record(store, row, repo=None):
     default_path = 'C:\\Software\\'+row['manifest_name']
     return {'repository': row['repository_name'], 'repository_name': repo['display_name'], 'owner': repo['owner'],
             'connection_id': repo['connection_id'], 'repository_available': repo['available'],
+            'category': repo['server_metadata'].get('category', 'Undefined'),
             'repository_error': repo['unavailable_reason'], 'refresh_job': repo['refresh_job'],
             'private': repo['private'], 'published': bool(row['published']),
             'manifest_name': row['manifest_name'], 'source_version': row['manifest_version'],
@@ -198,7 +199,7 @@ def publish(store, name, value, *, job_id=None, expected_revision=None):
 
 
 def save(store, name, value):
-    if not isinstance(value, dict) or set(value) != {'display_name', 'install_path', 'description'}:
+    if not isinstance(value, dict) or set(value) not in ({'display_name', 'install_path', 'description'}, {'display_name', 'install_path', 'description', 'category'}):
         raise ValueError('Provide Display-Name, Install-Path and Description.')
     app = get(store, name)
     repo = store.repository(name)
@@ -218,6 +219,8 @@ def save(store, name, value):
     with store.connect() as db:
         db.execute('BEGIN IMMEDIATE')
         check_connection(db, name, repo['connection_id'], connection['revision'])
+        if 'category' in value:
+            repo_metadata.update(db, name, {'category': value['category']})
         db.execute('UPDATE apps SET display_name_override=?,install_path_override=?,description=?,updated=? WHERE repository_name=?',
                    (display, target, description, now(), app['repository']))
     return get(store, name)
@@ -251,7 +254,7 @@ def dispatch(handler):
         if parts == ['overview'] and handler.command in ('GET', 'HEAD'):
             with store.connect() as db:
                 pending = db.execute("SELECT count(*) FROM jobs WHERE kind='app_publish' AND status IN ('queued','running') AND cancel=0").fetchone()[0]
-            return handler.json(200, {'apps': overview(store), 'publishing': pending, 'active_jobs':store.active_jobs()})
+            return handler.json(200, {'apps': overview(store), 'publishing': pending, 'active_jobs':store.active_jobs(), 'categories': repo_metadata.CATEGORIES})
         if parts[:1] == ['actions'] and len(parts) == 2 and handler.command == 'POST':
             from .app_releases import request, batch
             value = json.loads(handler.body())

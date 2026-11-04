@@ -1,7 +1,7 @@
 "use strict";
 (() => {
   const U=window.R4,E=U.esc,api=(path,options)=>U.api('apps/'+path,options);
-  let editing=null,lastValue=null,overviewRequest=0,overviewGeneration=0;
+  let editing=null,lastValue=null,overviewRequest=0,overviewGeneration=0,category='';
   const pending=new Map(),errors=new Map();
   const active=job=>job&&['queued','running'].includes(job.status);
   const labels={not_downloaded:'Not downloaded',current:'Up to date',outdated:'Update available',local_available:'Available locally',local_newer:'Local version retained',damaged:'Local files damaged',conflict:'Release changed'};
@@ -48,7 +48,7 @@
       const progress=busy&&job?.result?.progress,percent=Number(progress?.percent),known=progress?.percent!==null&&progress?.percent!==undefined&&Number.isFinite(percent);
       const releaseLink=release.available?.url||release.local?.url;
       const content='<div class="record-grid app-overview-grid"><div class="record-identity"><h2 class="record-name app-name">'+E(app.display_name)+'</h2><span class="record-subline app-version">'+E(versions)+'</span>'+newer+
-        '<div class="app-release-status"><span class="badge app-release-badge" data-release-state="'+E(release.state||'unknown')+'">'+E(status)+'</span></div>'+
+        '<div class="app-release-status"><span class="badge app-release-badge" data-release-state="'+E(release.state||'unknown')+'">'+E(status)+'</span><span class="badge app-category" title="Category">'+E(app.category||'Undefined')+'</span></div>'+
         (app.description?'<p class="app-description">'+E(app.description)+'</p>':'')+
         (progress?'<progress class="app-progress" max="100"'+(known?' value="'+Math.min(100,Math.max(0,percent))+'"':'')+' aria-label="App download progress"></progress>':'')+'</div>'+
         '<div role="group" aria-label="Install-Path"><span class="app-install-path">'+E(app.install_path)+'</span></div>'+
@@ -58,12 +58,14 @@
         (releaseLink?'<a class="button subtle" href="'+E(releaseLink)+'" target="_blank" rel="noopener noreferrer">Release</a>':'')+
         '<button type="button" id="app-edit-'+E(name)+'" class="button subtle" data-edit-app="'+E(name)+'" aria-label="Edit '+E(app.display_name)+'">Edit</button>'+
         (error?'<div class="entry-refresh-message" role="alert"><span>'+E(error)+'</span>'+(!errors.has(name)&&job?.id?'<button type="button" class="button subtle" data-repo-action="job" data-name="'+E(job.id)+'">Log</button>':'')+'</div>':'');
-      return U.record(content,actions,' data-record-key="'+E(name)+'" data-app-repository="'+E(name)+'" aria-busy="'+busy+'"',busy?'is-refreshing':'');
+      return U.record(content,actions,' data-record-key="'+E(name)+'" data-app-repository="'+E(name)+'" data-app-category="'+E(app.category||'Undefined')+'"'+(category&&category!==(app.category||'Undefined')?' hidden':'')+' aria-busy="'+busy+'"',busy?'is-refreshing':'');
     });
     const bulkBusy=pending.has('*'),downloadCount=value.apps.filter(app=>!states.get(app.repository).busy&&app.release?.can_download).length,updateCount=value.apps.filter(app=>!states.get(app.repository).busy&&app.release?.can_update).length;
     const toolbar=button('download_all','',bulkBusy&&pending.get('*')==='download_all'?'Starting…':'Download all',bulkBusy||downloadCount===0,downloadCount?'Download all apps without a local release.':'No apps are ready to download. Refresh to check published releases.')+
       button('update_all','',bulkBusy&&pending.get('*')==='update_all'?'Starting…':'Update all ('+updateCount+')',bulkBusy||updateCount===0,updateCount?'Download all newer app releases.':'No checked apps have a newer release.');
-    const html='<section id="apps-overview" class="apps-list" aria-label="Apps overview">'+(errors.has('*')?'<p class="workspace-notice" role="alert">'+E(errors.get('*'))+'</p>':'')+(rows.length?U.records(rows,'Apps'):value.publishing?U.empty('Adding apps','Apps appear here after their manifests have been read.'):U.empty('No apps listed','Enable Show in Apps for an application in Repositories → Overview.'))+'</section>';
+    const filters='<div class="app-filters"><label class="repo-category">Category<select id="app-category-filter"><option value="">All categories</option>'+(value.categories||[]).map(item=>'<option value="'+E(item)+'"'+(category===item?' selected':'')+'>'+E(item)+'</option>').join('')+'</select></label></div>';
+    const matching=value.apps.some(app=>!category||category===(app.category||'Undefined'));
+    const html='<section id="apps-overview" class="apps-list" aria-label="Apps overview">'+filters+(errors.has('*')?'<p class="workspace-notice" role="alert">'+E(errors.get('*'))+'</p>':'')+(rows.length?U.records(rows,'Apps')+'<div id="app-filter-empty"'+(matching?' hidden':'')+'>'+U.empty('No matching apps','Choose another category.')+'</div>':value.publishing?U.empty('Adding apps','Apps appear here after their manifests have been read.'):U.empty('No apps listed','Enable Show in Apps for an application in Repositories → Overview.'))+'</section>';
     U.page(ctx,'Apps','',html,toolbar,button('refresh_all','',bulkBusy&&pending.get('*')==='refresh_all'?'Starting…':'Refresh',bulkBusy||value.apps.length===0,'Check all listed apps for published releases.'),partial);
     U.status('Apps loaded.');
     if(value.publishing||pending.size||[...states.values()].some(item=>item.busy))poll(ctx);
@@ -111,6 +113,7 @@
         '<label>Display-Name<input name="display_name" maxlength="128" value="'+E(app.display_name)+'" placeholder="'+E(app.default_display_name)+'"><small class="muted">Default: '+E(app.default_display_name)+'. Clear this field to use the manifest name.</small></label>'+
         '<label>Install-Path<input name="install_path" maxlength="240" spellcheck="false" value="'+E(app.install_path)+'" placeholder="'+E(app.default_install_path)+'"><small class="muted">Default: '+E(app.default_install_path)+'. Clear this field to use the default path.</small></label>'+
         '<label>Description<textarea name="description" rows="6" maxlength="8192">'+E(app.description)+'</textarea></label>'+
+        '<label>Category<select name="category">'+(lastValue?.categories||[]).map(item=>'<option value="'+E(item)+'"'+(item===app.category?' selected':'')+'>'+E(item)+'</option>').join('')+'</select><small class="muted">Shared with the source repository.</small></label>'+
         '<div class="form-actions"><button type="submit" class="button primary">Save</button><button type="button" class="button subtle" data-action="close-dialog">Cancel</button></div><p class="form-message" role="alert"></p></form>');
     }catch(error){U.status(error.message,true);}finally{if(button.isConnected)button.disabled=false;}
   });
@@ -119,12 +122,18 @@
     const app=editing,generation=U.generation,submit=form.querySelector('[type=submit]');
     const display=form.elements.namedItem('display_name').value.trim(),path=form.elements.namedItem('install_path').value.trim();
     const body={display_name:!display||(display===app.display_name&&app.display_name_override===null)?null:display,
-      install_path:!path||(path===app.install_path&&app.install_path_override===null)?null:path,description:form.elements.namedItem('description').value};
+      install_path:!path||(path===app.install_path&&app.install_path_override===null)?null:path,description:form.elements.namedItem('description').value,category:form.elements.namedItem('category').value};
     submit.disabled=true;form.querySelector('.form-message').textContent='';
     try{
       await api('items/'+encodeURIComponent(form.dataset.repository),{method:'PUT',body});
       if(generation===U.generation&&form.isConnected){await loadOverview(U.current,true);if(form.isConnected)form.closest('dialog').close();U.status('App settings saved.');}
     }catch(error){if(form.isConnected)form.querySelector('.form-message').textContent=error.message;U.status(error.message,true);}
     finally{if(submit.isConnected)submit.disabled=false;}
+  });
+  document.addEventListener('change',event=>{
+    if(event.target.id!=='app-category-filter')return;
+    category=event.target.value;
+    for(const row of document.querySelectorAll('[data-app-repository]'))row.hidden=!!category&&row.dataset.appCategory!==category;
+    const empty=document.querySelector('#app-filter-empty');if(empty)empty.hidden=[...document.querySelectorAll('[data-app-repository]')].some(row=>!row.hidden);
   });
 })();
