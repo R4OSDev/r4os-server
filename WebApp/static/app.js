@@ -119,6 +119,7 @@ window.R4 = (() => {
       const response=await fetch('/api/'+path,{cache:'no-store',credentials:'same-origin',...options,headers,signal:controller.signal});
       const result=await response.json();
       if(!response.ok) {const error=new Error(result.detail || errors[result.error] || (result.error?String(result.error).replaceAll('_',' '):'Request failed.')); error.status=response.status;throw error;}
+      if(options.method&&!['GET','HEAD'].includes(options.method))ui.jobs?.refresh();
       return result;
     } catch(error) {if(error.name==='AbortError') throw new Error('The service did not respond in time.');throw error;}
     finally {clearTimeout(timeout);}
@@ -133,11 +134,11 @@ window.R4 = (() => {
     clearTimeout(ui.poll);
     document.querySelector('#detail-dialog')?.close();
     const parts=location.hash.slice(1).split('/');
-    let view=parts[0] || 'apps';if(!['apps','updates','benchmarks','repositories','settings'].includes(view)) view='apps';
+    let view=parts[0] || 'apps';if(!['apps','updates','benchmarks','repositories','jobs','settings'].includes(view)) view='apps';
     let leaf='';try{leaf=decodeURIComponent(parts[2] || '');}catch{}
     const ctx={view,sub:parts[1] || (view==='benchmarks'?'spectra':view==='settings'?'registration':'overview'),leaf,generation:++ui.generation};ui.current=ctx;
     for(const link of document.querySelectorAll('[data-view]')) {if(link.dataset.view===view)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');}
-    const label={apps:'Apps',updates:'Updates',benchmarks:'Benchmarks',repositories:'Repositories',settings:'Settings'}[view];document.title=label+' – R4OS Server';content.setAttribute('aria-label','Workspace: '+label);
+    const label={apps:'Apps',updates:'Updates',benchmarks:'Benchmarks',repositories:'Repositories',jobs:'Jobs',settings:'Settings'}[view];document.title=label+' – R4OS Server';content.setAttribute('aria-label','Workspace: '+label);
     document.querySelector('.submenu-column').innerHTML='';ui.context(ctx);
     ui.show(ctx,'<div class="loading-state" role="status">Loading data …</div>');
     try {
@@ -163,7 +164,7 @@ window.R4 = (() => {
   };
   document.addEventListener('click',async event=>{
     const button=event.target.closest('[data-action]');if(!button)return;
-    if(button.dataset.action==='refresh')ui.navigate();
+    if(button.dataset.action==='refresh'){if(ui.current?.view==='jobs')ui.jobs.refresh();else ui.navigate();}
     if(button.dataset.action==='close-dialog')document.querySelector('#detail-dialog')?.close();
   });
   window.addEventListener('hashchange',ui.navigate);

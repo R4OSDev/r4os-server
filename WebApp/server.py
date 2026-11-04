@@ -31,6 +31,7 @@ STATIC_ROUTES = {
     "/": ("index.html", "text/html; charset=utf-8"),
     "/app.css": ("app.css", "text/css; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+    "/jobs.js": ("jobs.js", "text/javascript; charset=utf-8"),
     "/updates.js": ("updates.js", "text/javascript; charset=utf-8"),
     "/settings.js": ("settings.js", "text/javascript; charset=utf-8"),
     "/benchmarks.js": ("benchmarks.js", "text/javascript; charset=utf-8"),
@@ -166,6 +167,9 @@ class WebAppHandler(Handler):
                 raise HTTPError(403, "host_not_allowed")
             if self.command not in ("GET", "HEAD"):
                 self.same_origin()
+            if path == '/api/jobs' and self.command in ('GET','HEAD'):
+                from r4os_server.workspace.jobs import snapshot
+                return self.json(200,snapshot(self))
             if path.startswith("/api/repositories/"):
                 from r4os_server.workspace.api import dispatch
                 return dispatch(self)

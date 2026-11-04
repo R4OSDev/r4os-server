@@ -49,6 +49,8 @@ class Handler(UpdateGatewayHandler):
 class Server(UpdateGatewayServer):
     def management(self,handler,path):
         actor=self.policy.require_role(handler,("admin","publisher"))
+        if path=='/api/updates/jobs' and handler.command in ('GET','HEAD'):
+            return 200,self.uploads.active()
         if handler.command=="PUT" and path in ("/api/updates/uploads/package","/api/updates/uploads/manifest"):
             return 202,self.uploads.receive(handler,path.rsplit('/',1)[1],actor)
         match=re.fullmatch(r"/api/updates/uploads/([0-9a-f]{32})(/publish)?",path)

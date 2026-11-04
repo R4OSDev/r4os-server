@@ -100,6 +100,11 @@ class Uploads:
         with self.store._connect() as connection:
             return {row['status']:row['total'] for row in connection.execute('SELECT status,count(*) total FROM uploads GROUP BY status')}
 
+    def active(self):
+        with self.store._connect() as connection:
+            rows=connection.execute("SELECT id,kind,status,filename,created_at FROM uploads WHERE status IN ('receiving','queued','validating') ORDER BY created_at,rowid").fetchall()
+        return {'items':[dict(row) for row in rows]}
+
     def receive(self,handler,kind,actor):
         maximum=self.config.upload_limit if kind=='package' else 1024*1024
         content_type='application/octet-stream' if kind=='package' else 'application/json'

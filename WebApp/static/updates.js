@@ -106,7 +106,8 @@
     xhr.onload=async()=>{try{const result=JSON.parse(xhr.responseText);if(xhr.status<200 || xhr.status>=300)throw new Error(result.detail || ({413:'The file is too large.',415:'This file type is not supported.',401:'Please sign in again.'}[xhr.status]) || 'Transfer failed.');uploadOffset=0;if(U.generation===generation)await U.navigate();U.status('File received. Check its validation status in Incoming.');}catch(error){message.textContent=error.message;U.status(error.message,true);}};
     xhr.onerror=()=>{message.textContent='Connection interrupted. Refresh incoming uploads.';U.status(message.textContent,true);};
     xhr.onabort=()=>{U.status(progress.value>=100?'Request cancelled. Check incoming uploads for completely received files.':'Transfer cancelled.');setTimeout(()=>{if(U.generation===generation)U.navigate();},200);};
-    xhr.onloadend=()=>{U.busy=false;button.disabled=false;cancel.hidden=true;};
+    xhr.upload.onloadstart=()=>U.jobs?.refresh();
+    xhr.onloadend=()=>{U.busy=false;button.disabled=false;cancel.hidden=true;U.jobs?.refresh();};
     cancel.onclick=()=>xhr.abort();xhr.send(file);
   });
 })();

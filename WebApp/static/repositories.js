@@ -91,7 +91,6 @@
       return U.record(content,actions,' data-record-key="'+E(repo.name)+'" aria-busy="'+refreshing+'" data-repo-search="'+E(repositorySearch(repo))+'" data-category="'+E(classification)+'" data-account="'+E((repo.owner||'').toLowerCase())+'"'+(repositoryMatches(repo)?'':' hidden'),'repository-entry'+(refreshing?' is-refreshing':''));
     }),'Repository overview')+'</div><div id="repository-filter-empty"'+(matching?' hidden':'')+'>'+U.empty('No matching repositories','Choose another category or change the search.')+'</div>':U.empty('No catalogue yet','Connect an account and enable its repositories in Connections.');
     html+='</section>';
-    if(jobs.length)html+='<section id="repository-active-jobs" class="record-section"><div class="panel-heading"><h2>Active jobs</h2></div>'+jobRows(jobs)+'</section>';
     const repositoryBusy=jobs.some(job=>['refresh','catalog','check','download','download_all','update','update_all','connection_delete'].includes(job.kind));
     const canDownload=repos.some(repo=>repo.available&&!repo.local.commit&&!['empty','conflict'].includes(repo.local.status));
     const updates=state.update_count||0;

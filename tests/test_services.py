@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from r4os_server.common.auth import password_hash
 from r4os_server.common.config import Config
@@ -63,6 +64,28 @@ class ServiceTests(unittest.TestCase):
         with socket.create_connection(self.registration.server_address,timeout=5) as client:
             client.sendall(self.config.registration_secret.encode())
             self.assertEqual(client.recv(2),b"OK")
+
+    def test_global_jobs_include_both_queues_without_recent_job_limit(self):
+        from WebApp.server import create_server
+        web=self.start(create_server(replace(self.config,updates_port=self.updates.server_port),port=0))
+        for number in range(40):web.workspace.enqueue('github_status','fixture-'+str(number))
+        with self.updates.uploads.store._connect() as db:
+            for number,status in enumerate(('receiving','queued','validating','valid')):
+                db.execute('INSERT INTO uploads VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                           (str(number)*32,'package',status,None,1,None,None,None,'2026-11-04T00:00:00Z','2026-11-04T00:00:00Z','127.0.0.1','fixture'))
+        self.assertEqual(self.request('GET','/api/updates/jobs')[0],401)
+        status,value,_=self.request('GET','/api/jobs',server=web)
+        self.assertEqual(status,200);self.assertTrue(value['complete']);self.assertEqual(value['count'],43)
+        self.assertEqual(len({job['key'] for job in value['jobs']}),43)
+        self.assertEqual(sum(job['source']=='updates' for job in value['jobs']),3)
+        self.assertEqual(self.request('GET','/api/jobs',headers={'Host':'invalid.example'},server=web)[0],403)
+        with patch.object(self.updates.uploads,'active',side_effect=ValueError('Fixture unavailable')):
+            partial=self.request('GET','/api/jobs',server=web)[1]
+        self.assertFalse(partial['complete']);self.assertIsNone(partial['count']);self.assertEqual(partial['known_count'],40)
+        import sqlite3
+        with patch.object(web.workspace,'active_jobs',side_effect=sqlite3.OperationalError('Fixture unavailable')):
+            partial=self.request('GET','/api/jobs',server=web)[1]
+        self.assertFalse(partial['sources']['workspace']);self.assertEqual(partial['known_count'],3)
 
     def test_shared_registration_roles_and_untrusted_forwarded_ip(self):
         self.assertEqual(self.request("GET","/catalog")[0],401)
