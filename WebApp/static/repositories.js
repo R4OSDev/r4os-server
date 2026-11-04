@@ -8,9 +8,10 @@
   let sdkTools=null,sdkDetailsOpen=sdkStored('sdk-details-open')==='1';
   const sdkToolDrafts=new Map();
   let overviewRequest=0,overviewGeneration=0;
+  const buildRequests=new Set(),buildErrors=new Map();
   const active=job=>['queued','running'].includes(job.status);
   const status=value=>'<span class="badge">'+E(states[value]||value||'Unknown')+'</span>';
-  const button=(label,action,name='',disabled=false,primary=false,title='',ariaLabel='',loading=false)=>'<button type="button" class="button '+(primary?'primary':'subtle')+(loading?' is-loading':'')+(action==='refresh'&&label==='Updated'?' is-updated':'')+'" data-repo-action="'+E(action)+'" data-name="'+E(name)+'"'+(disabled?' disabled':'')+(title?' title="'+E(title)+'"':'')+(ariaLabel?' aria-label="'+E(ariaLabel)+'"':'')+(loading?' aria-busy="true"':'')+'>'+(['catalog','sdk_refresh','refresh'].includes(action)?action==='refresh'&&label==='Updated'?U.updatedIcon:U.refreshIcon:'')+E(label)+'</button>';
+  const button=(label,action,name='',disabled=false,primary=false,title='',ariaLabel='',loading=false)=>'<button type="button" class="button '+(primary?'primary':'subtle')+(loading?' is-loading':'')+(action==='refresh'&&label==='Updated'?' is-updated':'')+'" data-repo-action="'+E(action)+'" data-name="'+E(name)+'"'+(disabled?' disabled':'')+(title?' title="'+E(title)+'"':'')+(ariaLabel?' aria-label="'+E(ariaLabel)+'"':'')+(loading?' aria-busy="true"':'')+'>'+(['catalog','sdk_refresh','refresh'].includes(action)||loading?action==='refresh'&&label==='Updated'?U.updatedIcon:U.refreshIcon:'')+E(label)+'</button>';
   const affectsRepository=U.affectsRepository;
   const repositorySearch=repo=>((repo.display_name||repo.name)+' '+(repo.owner||'')+' '+repo.description).toLowerCase();
   const repositoryMatches=repo=>repositorySearch(repo).includes(filter.toLowerCase())&&(!category||(repo.server_metadata?.category||'Undefined')===category)&&(!account||(repo.owner||'').toLowerCase()===account);
@@ -81,13 +82,14 @@
     const matching=repos.some(repositoryMatches);
     html+=repos.length?'<div class="repository-list"'+(matching?'':' hidden')+'>'+U.records(repos.map(repo=>{
       const local=repo.local||{},feedback=U.entryRefresh.state(repo.name,repo.refresh_job),refreshing=feedback.busy;
-      const busy=refreshing||jobs.some(job=>affectsRepository(job,repo));
-      const refreshBlocked=jobs.some(job=>U.repositoryActions.includes(job.kind)&&affectsRepository(job,repo));
+      const startingBuild=buildRequests.has(repo.name),building=jobs.some(job=>['build','build_publish'].includes(job.kind)&&job.subject===repo.name);
+      const busy=startingBuild||refreshing||jobs.some(job=>affectsRepository(job,repo));
+      const refreshBlocked=startingBuild||jobs.some(job=>U.repositoryActions.includes(job.kind)&&affectsRepository(job,repo));
       const classification=repo.server_metadata?.category||'Undefined';
       const sourceAction=local.status==='outdated'?button('Update','update',repo.name,busy||!repo.available||local.dirty,true):button(local.commit||local.status==='empty'?'Downloaded':'Download','download',repo.name,busy||!!local.commit||local.status==='empty'||!repo.available);
       const content='<div class="record-head"><button class="repository-name" data-repo-action="details" data-name="'+E(repo.name)+'">'+E(repo.display_name||repo.name)+'</button><span class="record-aside repository-owner">'+E(repo.owner||'')+'</span></div><div class="record-grid repository-info"><div class="record-identity">'+(repo.description?'<p class="record-description">'+E(repo.description)+'</p>':'')+'<div class="repository-labels"><span class="badge">'+(repo.private?'Private':'Public')+'</span>'+(repo.archived?'<span class="badge">Archived</span>':'')+'</div>'+(!repo.available?'<p class="muted">'+E(repo.unavailable_reason)+'</p>':'')+'</div><div role="group" aria-label="Category"><span class="badge">'+E(classification)+'</span></div><div class="repository-local" role="group" aria-label="Local status" data-local-status="'+E(!repo.available?'unavailable':local.status||'missing')+'">'+status(!repo.available?'Access unavailable':local.status||'missing')+(local.commit?'<p><code>'+E(local.commit.slice(0,12))+'</code> · '+E(local.branch||'')+'</p>':'')+'</div></div>';
       const refreshAction=button(refreshing?'Refreshing…':feedback.error?'Retry':feedback.updated?'Updated':'Refresh','refresh',repo.name,refreshing||refreshBlocked||!repo.available,false,!repo.available?repo.unavailable_reason:refreshing?'Refreshing this repository…':refreshBlocked?'Wait for the current repository action to finish.':'Refresh metadata, source status and GitHub release status.','Refresh '+(repo.owner?repo.owner+'/':'')+(repo.display_name||repo.name),refreshing);
-      const actions=refreshAction+sourceAction+button('Build','build_publish',repo.name,!repo.build_release?.enabled||busy,false,repo.build_release?.reason||'Checking build readiness…')+button('Edit','edit',repo.name)+'<label class="repository-publish"><input type="checkbox" data-repository-publish="'+E(repo.name)+'" title="Show in Apps" aria-label="Show in Apps '+E(repo.display_name||repo.name)+'"'+(repo.published||repo.publishing?' checked':'')+((busy&&!repo.publishing)||(!repo.available&&!repo.published&&!repo.publishing)?' disabled':'')+'>Show in Apps'+(repo.publishing?'…':'')+'</label>'+(repo.publish_error?'<p class="form-message" role="alert">'+E(repo.publish_error)+'</p>':'')+(feedback.error?'<div class="repository-refresh-message" role="alert"><span>'+E('Refresh failed: '+feedback.error)+'</span>'+(feedback.log?button('Log','job',feedback.log):'')+'</div>':'');
+      const actions=refreshAction+sourceAction+button(startingBuild?'Starting…':building?'Building…':'Build','build_publish',repo.name,!repo.build_release?.enabled||busy,false,startingBuild?'Starting the build…':building?'Build and GitHub upload in progress.':repo.build_release?.reason||'Checking build readiness…','',startingBuild||building)+button('Edit','edit',repo.name)+'<label class="repository-publish"><input type="checkbox" data-repository-publish="'+E(repo.name)+'" title="Show in Apps" aria-label="Show in Apps '+E(repo.display_name||repo.name)+'"'+(repo.published||repo.publishing?' checked':'')+((busy&&!repo.publishing)||(!repo.available&&!repo.published&&!repo.publishing)?' disabled':'')+'>Show in Apps'+(repo.publishing?'…':'')+'</label>'+(repo.publish_error?'<p class="form-message" role="alert">'+E(repo.publish_error)+'</p>':'')+(buildErrors.has(repo.name)?'<p class="form-message" role="alert">'+E('Build could not start: '+buildErrors.get(repo.name))+'</p>':'')+(feedback.error?'<div class="repository-refresh-message" role="alert"><span>'+E('Refresh failed: '+feedback.error)+'</span>'+(feedback.log?button('Log','job',feedback.log):'')+'</div>':'');
       return U.record(content,actions,' data-record-key="'+E(repo.name)+'" aria-busy="'+refreshing+'" data-repo-search="'+E(repositorySearch(repo))+'" data-category="'+E(classification)+'" data-account="'+E((repo.owner||'').toLowerCase())+'"'+(repositoryMatches(repo)?'':' hidden'),'repository-entry'+(refreshing?' is-refreshing':''));
     }),'Repository overview')+'</div><div id="repository-filter-empty"'+(matching?' hidden':'')+'>'+U.empty('No matching repositories','Choose another category or change the search.')+'</div>':U.empty('No catalogue yet','Connect an account and enable its repositories in Connections.');
     html+='</section>';
@@ -112,6 +114,9 @@
     }
     if(phase==='submitted'||phase==='error')loadOverview(ctx,true).catch(error=>U.status(error.message,true));
   });
+  window.addEventListener('jobs-updated',()=>{
+    const ctx=U.current;if(ctx?.view==='repositories'&&ctx.sub==='overview'&&overviewGeneration===ctx.generation&&!U.poll)loadOverview(ctx,true).catch(error=>U.status(error.message,true));
+  });
   function applyFilter(){
     const rows=[...document.querySelectorAll('[data-repo-search]')];
     rows.forEach(row=>{
@@ -124,14 +129,24 @@
   }
   async function openBuild(name){
     const generation=U.generation,value=await api('items/'+encodeURIComponent(name)+'/build');
-    if(generation!==U.generation)return;
     if(!value.enabled)throw new Error(value.reason);
     if(value.targets.length===1){
-      const job=await api('build-publish',{method:'POST',body:{name,target:value.targets[0].id}});
-      await showJob(job.id);return;
+      await startRepositoryBuild(name,value.targets[0].id);return;
     }
+    if(generation!==U.generation)return;
     const selected=value.targets.find(item=>item.enabled);
     U.open('Build and publish on GitHub','<form id="repository-build-publish" data-name="'+E(name)+'"><p class="muted">Build a pinned source revision and upload the resulting artifacts to GitHub Releases.</p><label>Build target<select name="target">'+value.targets.map(item=>'<option value="'+E(item.id)+'" data-version="'+E(item.version)+'"'+(!item.enabled?' disabled':'')+(item.id===selected.id?' selected':'')+'>'+E(item.name+' · '+item.kind+' · v'+item.version+(item.state==='published'?' · Already published':''))+'</option>').join('')+'</select></label><p class="muted">The release tag is taken from the selected target’s manifest version.</p><div class="form-actions"><button type="submit" class="button primary">Build</button><button type="button" class="button subtle" data-action="close-dialog">Cancel</button></div><p class="form-message" role="alert"></p></form>');
+  }
+  function paintBuildState(){
+    const ctx=U.current;if(ctx?.view==='repositories'&&ctx.sub==='overview'&&overviewGeneration===ctx.generation)renderOverview(ctx,lastState,true);
+  }
+  async function startRepositoryBuild(name,target){
+    const job=await api('build-publish',{method:'POST',body:{name,target}}),ctx=U.current;
+    if(ctx?.view==='repositories'&&ctx.sub==='overview'&&overviewGeneration===ctx.generation){
+      lastState.active_jobs=[...(lastState.active_jobs||lastState.jobs.filter(active)).filter(item=>item.id!==job.id),job].filter(active);
+      paintBuildState();loadOverview(ctx,true).catch(error=>U.status(error.message,true));
+    }
+    U.status('Build queued. Open Jobs to follow progress.');return job;
   }
   async function editRepository(name){
     const {repository:repo}=await api('items/'+encodeURIComponent(name));
@@ -446,6 +461,13 @@
     if(action==='test_file_add'){document.querySelector('#test-files').insertAdjacentHTML('beforeend',testFileRow());return;}
     if(action==='test_file_remove'){node.closest('.test-file-row').remove();return;}
     if(action==='refresh'){await U.entryRefresh.request(name);return;}
+    if(action==='build_publish'){
+      if(buildRequests.has(name))return;
+      buildRequests.add(name);buildErrors.delete(name);paintBuildState();
+      try{await openBuild(name);}catch(error){buildErrors.set(name,error.message);U.status(error.message,true);}
+      finally{buildRequests.delete(name);paintBuildState();}
+      return;
+    }
     if(['details','job','edit'].includes(action))dialogTrigger=node;
     node.disabled=true;
     try{
@@ -465,7 +487,6 @@
         if(location.hash===hash)await U.navigate();else location.hash=hash;
         U.status(label+' deleted.');return;
       }
-      if(action==='build_publish'){await openBuild(name);return;}
       if(action==='details'){await details(name);return;}
       if(action==='edit'){await editRepository(name);return;}
       if(action==='job'){await showJob(name);return;}
@@ -534,9 +555,14 @@
     }
     const form=event.target;if(!['repository-build','repository-build-publish','release-new','release-edit','release-build','test-configuration'].includes(form.id))return;
     event.preventDefault();const submit=form.querySelector('[type="submit"]');submit.disabled=true;
+    const publication=form.id==='repository-build-publish';
+    if(publication){buildRequests.add(form.dataset.name);buildErrors.delete(form.dataset.name);paintBuildState();}
     try{
       const values=new FormData(form);let result;
-      if(form.id==='repository-build-publish')result=await api('build-publish',{method:'POST',body:{name:form.dataset.name,target:values.get('target')}});
+      if(publication){
+        await startRepositoryBuild(form.dataset.name,values.get('target'));
+        if(form.isConnected)form.closest('dialog').close();return;
+      }
       else if(form.id==='repository-build')result=await api('build',{method:'POST',body:{name:form.dataset.name,target:values.get('target')}});
       else if(form.id==='release-new'){
         const template=values.get('template');
@@ -562,6 +588,9 @@
         U.status('Test configuration saved.');return;
       }else result=await api('releases/'+form.dataset.id+'/build',{method:'POST',body:{version:values.get('version'),revision:Number(form.dataset.revision)}});
       await showJob(result.id);
-    }catch(error){form.querySelector('.form-message').textContent=error.message;U.status(error.message,true);}finally{submit.disabled=false;}
+    }catch(error){form.querySelector('.form-message').textContent=error.message;if(publication)buildErrors.set(form.dataset.name,error.message);U.status(error.message,true);}finally{
+      if(publication){buildRequests.delete(form.dataset.name);paintBuildState();}
+      submit.disabled=false;
+    }
   });
 })();

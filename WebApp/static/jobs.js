@@ -23,7 +23,12 @@
   }
   function refresh(){
     if(inflight){again=true;return inflight;}
-    inflight=U.api('jobs').then(data=>{value=data;badge();render(U.current);})
+    inflight=U.api('jobs').then(data=>{
+      const identity=items=>JSON.stringify(items?.map(job=>[job.key,job.status,job.cancellable]));
+      const changed=identity(value?.jobs)!==identity(data.jobs);
+      value=data;badge();render(U.current);
+      if(changed)window.dispatchEvent(new Event('jobs-updated'));
+    })
       .catch(()=>{value=value?{...value,complete:false}:null;badge();render(U.current);})
       .finally(()=>{inflight=null;if(again){again=false;refresh();}});
     return inflight;

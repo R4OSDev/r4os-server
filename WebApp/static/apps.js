@@ -39,6 +39,9 @@
     if(value.publishing||value.apps.some(app=>U.entryRefresh.state(app.repository,app.refresh_job).busy||jobs.some(job=>U.affectsRepository(job,{name:app.repository,connection_id:app.connection_id}))))poll(ctx);
   }
   function poll(ctx){if(U.poll)return;U.poll=setTimeout(()=>{U.poll=null;if(ctx.generation===U.generation)loadOverview(ctx,true).catch(error=>U.status(error.message,true));},1500);}
+  window.addEventListener('jobs-updated',()=>{
+    const ctx=U.current;if(ctx?.view==='apps'&&overviewGeneration===ctx.generation&&!U.poll)loadOverview(ctx,true).catch(error=>U.status(error.message,true));
+  });
   window.addEventListener('entry-refresh',event=>{
     const ctx=U.current;if(ctx?.view!=='apps')return;
     const {name,phase,job}=event.detail;
