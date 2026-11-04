@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import sqlite3
 import uuid
+import weakref
 from urllib.parse import urlsplit
 
 ACTIVE = ("queued", "running")
@@ -119,6 +120,18 @@ class Store:
             initialize(db)
             if migrate_tests:
                 db.execute("UPDATE release_types SET test_configuration='standard-tests' WHERE base='test'")
+
+        # A read-only WAL reader cannot create missing -wal/-shm files. Keep
+        # one idle writer-capable connection open for the Store's lifetime so
+        # SQLite retains those files between short WebApp/worker transactions.
+        # There is no open read transaction to pin an old snapshot/checkpoint.
+        anchor = sqlite3.connect(self.database, timeout=30, check_same_thread=False)
+        try:
+            anchor.execute('SELECT name FROM sqlite_master LIMIT 1').fetchall()
+        except BaseException:
+            anchor.close()
+            raise
+        self._close_wal = weakref.finalize(self, anchor.close)
 
     @contextmanager
     def connect(self):

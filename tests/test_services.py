@@ -95,6 +95,13 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual((status,body),(200,b''));self.assertGreater(int(head['Content-Length']),0)
         apps.save(case.store,'minesweeper',case.settings(display_name='New name'))
         self.assertNotEqual(self.request('GET','/api/v1/packages',server=server)[2]['ETag'],headers['ETag'])
+        # Idle Stores retain WAL sidecars for a service with a read-only state
+        # mount, without holding a snapshot that blocks writer checkpoints.
+        self.assertTrue(Path(str(case.store.database)+'-wal').is_file())
+        self.assertTrue(Path(str(case.store.database)+'-shm').is_file())
+        with case.store.connect() as db:
+            self.assertEqual(db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()[0],0)
+        self.assertEqual(self.request('GET','/api/v1/packages',server=server)[0],200)
         with case.store.connect() as db:
             db.execute("UPDATE repositories SET present=0 WHERE name='typed-2'")
         self.assertEqual(len(self.request('GET','/api/v1/packages',server=server)[1]['packages']),3)
