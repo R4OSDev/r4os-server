@@ -239,7 +239,7 @@ class WebAppHandler(Handler):
         if time.monotonic()-self.server.health_time < 3:
             return self.server.health_value
         values = {}
-        for name, port in (("updates", config.updates_port), ("benchmarks", config.benchmarks_port)):
+        for name, port in (("software", config.software_port), ("updates", config.updates_port), ("benchmarks", config.benchmarks_port)):
             installed = (PROJECT_ROOT/"r4os_server"/name/"service.py").exists()
             if not installed:
                 values[name] = "pending"

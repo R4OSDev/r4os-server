@@ -14,7 +14,7 @@ from .common.config import Config
 
 def main():
     parser = argparse.ArgumentParser(description="R4OS Server Dienste")
-    parser.add_argument("service", choices=("registration", "updates", "benchmarks"))
+    parser.add_argument("service", choices=("registration", "software", "updates", "benchmarks"))
     parser.add_argument("--config", default=os.environ.get("R4OS_SERVER_CONFIG", "/etc/r4os-server/server.json"))
     parser.add_argument("--check-config", action="store_true")
     args = parser.parse_args()

@@ -65,6 +65,24 @@ class ServiceTests(unittest.TestCase):
             client.sendall(self.config.registration_secret.encode())
             self.assertEqual(client.recv(2),b"OK")
 
+    def test_software_uses_shared_registration_revocation_ban_and_rate_limit(self):
+        from r4os_server.software.service import create_server
+        software=self.start(create_server(replace(self.config,software_port=0)))
+        self.assertEqual(self.request('GET','/api/health',server=software)[1]['service'],'software')
+        self.assertEqual(self.request('GET','/api/v1/packages',server=software)[0],401)
+        self.register()
+        self.assertEqual(self.request('GET','/api/v1/packages',server=software)[0],503)
+        software.policy.store.set_rate('software',1)
+        with patch.object(software.policy.limiter,'allow',return_value=False):
+            self.assertEqual(self.request('HEAD','/api/v1/packages',server=software)[0],429)
+        software.policy.store.set_rate('software',100)
+        # Direct shared-state revocation is also what the existing settings API uses.
+        software.policy.store.revoke('127.0.0.1')
+        self.assertEqual(self.request('HEAD','/api/v1/packages',server=software)[0],401)
+        self.assertEqual(self.request('GET','/api/v1/packages',server=software)[0],401)
+        self.assertEqual(self.request('GET','/api/v1/packages',server=software)[0],403)
+        self.assertEqual(self.request('GET','/catalog',server=self.updates)[0],403)
+
     def test_global_jobs_include_both_queues_without_recent_job_limit(self):
         from WebApp.server import create_server
         web=self.start(create_server(replace(self.config,updates_port=self.updates.server_port),port=0))
