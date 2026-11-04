@@ -65,6 +65,65 @@ class ServiceTests(unittest.TestCase):
             client.sendall(self.config.registration_secret.encode())
             self.assertEqual(client.recv(2),b"OK")
 
+    def software_fixture(self):
+        from test_apps import AppTests
+        from r4os_server.software.service import create_server
+        case=AppTests();case.setUp();self.addCleanup(case.doCleanups)
+        case.test_library_and_kernel_use_release_types_and_explicit_runtime_roles()
+        fake=case.remote_app();case.download_release()
+        server=self.start(create_server(replace(self.config,software_port=0,workspace_dir=str(case.store.root))))
+        self.register()
+        return server,case,fake
+
+    def test_software_catalog_types_dependencies_etag_and_local_availability(self):
+        from r4os_server.workspace import apps
+        server,case,fake=self.software_fixture()
+        status,value,headers=self.request('GET','/api/v1/packages',server=server)
+        self.assertEqual(status,200);self.assertEqual(value['schema_version'],1)
+        self.assertEqual({p['package_type'] for p in value['packages']},{'application','kernel','library'})
+        application=next(p for p in value['packages'] if p['package_type']=='application')
+        library=next(p for p in value['packages'] if p['package_type']=='library')
+        kernel=next(p for p in value['packages'] if p['package_type']=='kernel')
+        self.assertEqual(application['runtime_dependencies'][0]['package_id'],library['package_id'])
+        self.assertEqual(library['installation']['path'],'/R4OS/LIBS/R4IMG.R4L')
+        self.assertIsNone(kernel['installation']['path']);self.assertTrue(kernel['installation']['requires_client_plan'])
+        self.assertTrue(all(p['compatibility']['architecture'] is None for p in value['packages']))
+        self.assertTrue(all(len(p['assets'])==3 for p in value['packages']))
+        self.assertNotIn(str(case.root),json.dumps(value));self.assertNotIn('connection_id',json.dumps(value))
+        self.assertEqual(self.request('GET','/api/v1/packages',headers={'If-None-Match':headers['ETag']},server=server)[0],304)
+        status,body,head=self.request('HEAD','/api/v1/packages',server=server)
+        self.assertEqual((status,body),(200,b''));self.assertGreater(int(head['Content-Length']),0)
+        apps.save(case.store,'minesweeper',case.settings(display_name='New name'))
+        self.assertNotEqual(self.request('GET','/api/v1/packages',server=server)[2]['ETag'],headers['ETag'])
+        with case.store.connect() as db:
+            db.execute("UPDATE repositories SET present=0 WHERE name='typed-2'")
+        self.assertEqual(len(self.request('GET','/api/v1/packages',server=server)[1]['packages']),3)
+        apps.publish(case.store,'minesweeper',{'published':False})
+        self.assertEqual(len(self.request('GET','/api/v1/packages',server=server)[1]['packages']),2)
+        import sqlite3
+        with server.catalog.connect() as db,self.assertRaises(sqlite3.OperationalError):db.execute('DELETE FROM software_packages')
+
+    def test_software_catalog_rejects_corrupt_symlink_assets_and_conflicting_identities(self):
+        from r4os_server.workspace import app_storage,apps,connections
+        server,case,_=self.software_fixture()
+        status,value,_=self.request('GET','/api/v1/packages',server=server);self.assertEqual(status,200)
+        library=next(p for p in value['packages'] if p['package_type']=='library')
+        conn=connections.save(case.store,{'url':'https://github.com/Other'})
+        repo=case.seed('duplicate',2,conn['id']);root=case.store.root/'Repositories'/repo['directory']
+        (root/'module.R4MF').write_text('R4OS_MODULE_MANIFEST=2\nKIND=R4L\nNAME=R4IMG\nVERSION=0.1.0\nTARGET=/R4OS/LIBS/R4IMG.R4L\n')
+        apps.publish(case.store,'duplicate',{'published':True})
+        with case.store.connect() as db:db.execute('INSERT INTO app_release_refs VALUES(?,?,?,1)',('duplicate',2,11))
+        apps.save(case.store,'duplicate',case.settings(display_name='Different name'))
+        self.assertEqual(self.request('GET','/api/v1/packages',server=server)[0],409)
+        apps.publish(case.store,'duplicate',{'published':False})
+        item=next(p for p in apps.overview(case.store) if p['package_type']=='library')
+        folder=app_storage.path(case.store,item['release']['local']['directory']);binary=folder/'R4IMG.R4L';original=binary.read_bytes()
+        binary.write_bytes(b'x'*len(original))
+        value=self.request('GET','/api/v1/packages',server=server)[1]
+        self.assertNotIn(library['package_id'],[p['package_id'] for p in value['packages']]);self.assertEqual(len(value['unavailable']),1)
+        binary.unlink();outside=case.root/'outside';outside.write_bytes(original);binary.symlink_to(outside)
+        self.assertEqual(len(self.request('GET','/api/v1/packages',server=server)[1]['unavailable']),1)
+
     def test_software_uses_shared_registration_revocation_ban_and_rate_limit(self):
         from r4os_server.software.service import create_server
         software=self.start(create_server(replace(self.config,software_port=0)))

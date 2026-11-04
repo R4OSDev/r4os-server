@@ -71,7 +71,7 @@ class AppGitHub:
         if path.startswith('/git/trees/'):
             docs=self.source_documents
             if docs is None:
-                docs={'Cargo.toml':'[package]\nname="kernel"\nversion="'+self.release['tag_name'][1:]+'"\n'} if self.format=='ELF' else {'module.R4MF':MANIFEST.replace('MINESWEEPER_665F9DD0',self.target).replace('KIND=R4X','KIND='+self.format).replace('VERSION=0.1.0','VERSION='+self.release['tag_name'][1:])+'IMAGE_SCOPE=none\n'+('TARGET=/R4OS/LIBS/'+self.target+'.R4L\n' if self.format=='R4L' else '')}
+                docs={'Cargo.toml':'[package]\nname="kernel"\nversion="'+self.release['tag_name'][1:]+'"\n'} if self.format=='ELF' else {'module.R4MF':MANIFEST.replace('MINESWEEPER_665F9DD0',self.target).replace('KIND=R4X','KIND='+self.format).replace('VERSION=0.1.0','VERSION='+self.release['tag_name'][1:])+'IMAGE_SCOPE=none\n'+('TARGET=/R4OS/LIBS/'+self.target+'.R4L\nEXPORT=Query:fixture_query:1\n' if self.format=='R4L' else 'IMPORT=R4IMG:Query:1\n')}
             self.documents=list(docs.items())
             return {'truncated':False,'tree':[{'path':name,'type':'blob','mode':'100644','sha':'fixture-'+str(index)} for index,(name,_) in enumerate(self.documents)]}
         if path.startswith('/git/blobs/fixture-'):
@@ -571,3 +571,15 @@ class AppTests(unittest.TestCase):
         self.assertTrue(app_storage.current(self.store,second['repository'],hashes=True)['valid'])
         folder=app_storage.path(self.store,'Apps/2/Releases/11')
         self.assertFalse((folder/'LIBA.R4L').exists());self.assertTrue((folder/'LIBB.R4L').exists())
+        # A newer repository release for LIBA must not hide LIBB's last release.
+        fake.check=lambda:None
+        old_release=dict(fake.release);new_release=dict(old_release,id=12,tag_name='v0.2.0')
+        original_request=fake.request
+        def request(method,path,*args,**kwargs):
+            if path=='/releases/latest':return new_release
+            if path.startswith('/releases?'):return [new_release,old_release]
+            return original_request(method,path,*args,**kwargs)
+        def assets(release):return [a for a in fake.items if 'LIBA' in a['name']] if release['id']==12 else fake.items
+        with patch.object(fake,'request',side_effect=request),patch.object(fake,'assets',side_effect=assets):
+            selected=app_releases.selection(fake,self.store.repository(name),'LIBB',package=apps.existing(self.store,second['repository']))
+        self.assertEqual((selected['target'],selected['release_id']),('LIBB',11))
