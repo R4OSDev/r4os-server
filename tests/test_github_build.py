@@ -168,6 +168,27 @@ class GitHubBuildTests(unittest.TestCase):
         self.assertEqual(len([call for call in self.fake.calls if call[0]=='POST']),1)
         self.assertTrue(all(token=='fake-github-release-token' for _,token in self.fake.credentials))
 
+    def test_single_refresh_rechecks_only_its_release_and_suppresses_stale_checks(self):
+        self.assertTrue(self.warm()['enabled'])
+        with self.store.connect() as db:
+            db.execute('INSERT INTO repositories(name,github_id,metadata,directory) VALUES(?,?,?,?)',('other',6,json.dumps({'id':6,'name':'other','owner':'R4OSDev','display_name':'other'}),'Main/other'))
+            db.execute('INSERT INTO github_release_status VALUES(?,?,?,?)',('other','keep-signature',1,'{"keep":true}'))
+        job=self.store.enqueue('refresh','unusual-project');context=Context(self.store,job)
+        github_build.view(self.store,self.store.repository('unusual-project'),schedule=True,force=True)
+        self.assertFalse(any(item['kind']=='github_status' for item in self.store.active_jobs()))
+        self.fake.tags['v0.1.0']='a'*40
+        item={'id':5,'name':'unusual-project','owner':{'login':'R4OSDev'},'default_branch':'main','private':False,'description':'New repository metadata'}
+        with patch.object(catalog,'public_json',return_value=(item,{})),patch.object(catalog,'inspect',return_value=self.local):
+            result=worker.execute(context)
+        self.store.change_job(job['id'],status='completed',result=result)
+        current=github_build.view(self.store,self.store.repository('unusual-project'))
+        self.assertFalse(current['enabled']);self.assertIn('Increase',current['reason'])
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT payload FROM github_release_status WHERE repository_name=?',('other',)).fetchone()[0],'{"keep":true}')
+        retry=self.store.enqueue('refresh','unusual-project');context=Context(self.store,retry)
+        with patch.object(catalog,'public_json',return_value=(item,{})),patch.object(catalog,'inspect',return_value=self.local),patch.object(self.fake,'request',side_effect=GitHubFailure(503,'Release endpoint down')):
+            with self.assertRaisesRegex(GitHubFailure,'Release endpoint down'):worker.execute(context)
+
     def test_existing_tag_with_different_source_is_never_changed(self):
         self.fake.tags['v0.1.0']='a'*40
         info=self.warm();self.assertFalse(info['enabled']);self.assertIn('Increase',info['reason'])
@@ -232,6 +253,7 @@ class GitHubBuildTests(unittest.TestCase):
         self.warm()
         with ThreadPoolExecutor(max_workers=3) as pool:jobs=list(pool.map(lambda _:self.enqueue(),range(3)))
         self.assertEqual(len({job['id'] for job in jobs}),1)
+        self.assertEqual(self.enqueue()['id'],jobs[0]['id'])
         self.store.change_job(jobs[0]['id'],status='running',result={'github_release':{'published':True}})
         self.store.recover();self.assertEqual(self.store.job(jobs[0]['id'])['status'],'completed')
 

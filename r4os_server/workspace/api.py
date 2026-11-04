@@ -94,7 +94,7 @@ def dispatch(handler):
             return handler.json(200, {"repositories": repositories, "catalog": store.setting("catalog", {}),
                                       "categories": repo_metadata.CATEGORIES, "update_count": sum(bool(update_candidate(repo)) for repo in repositories),
                                       "worker": dict(worker, ready=time.time() - worker.get("heartbeat", 0) < 20),
-                                      "jobs": store.jobs(), "connections": connections.list_connections(store), "project_root": store.project_root})
+                                      "jobs": store.jobs(), "active_jobs":store.active_jobs(), "connections": connections.list_connections(store), "project_root": store.project_root})
         if len(parts) == 3 and parts[0] == "items" and parts[2] == "metadata" and method == "PUT":
             return handler.json(200, repo_metadata.save(store, parts[1], data(handler)))
         if len(parts) == 3 and parts[0] == "items" and parts[2] == "publication" and method == "PUT":
@@ -118,10 +118,16 @@ def dispatch(handler):
                                       "last_success": store.last_success(parts[1], "build")})
         if len(parts) == 2 and parts[0] == "actions" and method == "POST":
             kind = parts[1]
-            if kind not in ("catalog", "download", "update", "download_all", "update_all", "check"):
+            if kind not in ("refresh", "catalog", "download", "update", "download_all", "update_all", "check"):
                 raise ValueError("Unknown repository action.")
             value = data(handler)
             name = value.get("name", "")
+            if kind == 'refresh':
+                if set(value) != {'name'} or not name:
+                    raise ValueError('Choose exactly one repository to refresh.')
+                repo = store.require_repository(name)
+                connection = connections.get(store, repo['connection_id'])
+                return handler.json(202, store.enqueue('refresh',name,{'connection_id':connection['id'],'connection_revision':connection['revision']}))
             if name:
                 store.require_repository(name)
             if kind in ("download", "update") and not name:

@@ -72,6 +72,8 @@ def execute(context):
         return {"connections": results, "count": sum(item.get("count", 0) for item in results), "failed": sum("error" in item for item in results)}
     if kind == "download":
         return catalog.download(context, subject)
+    if kind == 'refresh':
+        return catalog.refresh_repository(context, subject, payload)
     if kind == "update":
         return catalog.update(context, subject)
     if kind in ("download_all", "update_all"):

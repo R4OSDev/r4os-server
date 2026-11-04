@@ -11,10 +11,12 @@ from urllib.parse import urlsplit
 ACTIVE = ("queued", "running")
 SDK_MUTATIONS = ('sdk_select', 'sdk_import', 'sdk_cleanup', 'tools_install', 'tools_update', 'tools_activate')
 FOLDERS = ("Repositories", "BuildTools", "Artifacts", "Release")
+REPOSITORY_ACTIONS = ('refresh','catalog','check','download','update','download_all','update_all','build','build_publish','app_publish','connection_delete')
 REPOSITORY_FIELDS = ("r.*,c.status AS connection_status,c.revision AS connection_revision,c.has_token AS connection_has_token,c.catalog AS connection_catalog,"
                      "COALESCE((SELECT published FROM apps WHERE repository_name=r.name),0) AS app_published,"
                      "EXISTS(SELECT 1 FROM jobs WHERE kind='app_publish' AND subject=r.name AND status IN ('queued','running') AND cancel=0) AS app_publishing,"
-                     "(SELECT CASE WHEN status='failed' THEN error ELSE '' END FROM jobs WHERE kind='app_publish' AND subject=r.name ORDER BY created DESC,rowid DESC LIMIT 1) AS app_publish_error")
+                     "(SELECT CASE WHEN status='failed' THEN error ELSE '' END FROM jobs WHERE kind='app_publish' AND subject=r.name ORDER BY created DESC,rowid DESC LIMIT 1) AS app_publish_error,"
+                     "(SELECT json_object('id',id,'status',status,'phase',phase,'error',error,'finished',finished) FROM jobs WHERE kind='refresh' AND subject=r.name ORDER BY created DESC,rowid DESC LIMIT 1) AS refresh_job")
 
 
 def update_candidate(repo):
@@ -25,6 +27,18 @@ def update_candidate(repo):
 
 class Conflict(ValueError):
     """A stale edit or an operation blocked by an existing reference."""
+
+
+def affects_repository(job, repo):
+    if job['subject'] == repo['name']:
+        return True
+    if job['kind'] == 'connection_delete':
+        return job['subject'] == repo['connection_id']
+    if job['kind'] == 'update_all' and isinstance(job['payload'].get('targets'), list):
+        return any(target.get('name') == repo['name'] for target in job['payload']['targets'])
+    if job['kind'] in ('catalog','check','download_all','update_all') and not job['subject']:
+        return job['payload'].get('connection_id') in (None, '', repo['connection_id'])
+    return False
 
 
 def now():
@@ -138,6 +152,7 @@ class Store:
         value["published"] = bool(row["app_published"])
         value["publishing"] = bool(row["app_publishing"])
         value["publish_error"] = row["app_publish_error"] or ""
+        value['refresh_job'] = json.loads(row['refresh_job']) if row['refresh_job'] else None
         value["private"] = bool(value.get("private"))
         reason = ""
         if row["connection_status"] != "ready":
@@ -221,12 +236,30 @@ class Store:
         layout = db.execute("SELECT value FROM kv WHERE key='repository_layout'").fetchone()
         if layout and json.loads(layout[0]).get("status") != "ready":
             raise Conflict("Repository directory migration is incomplete. Check the worker before starting new jobs.")
-        source = db.execute("SELECT metadata FROM repositories WHERE name=?", (subject,)).fetchone()
+        source = db.execute("SELECT name,connection_id,metadata FROM repositories WHERE name=?", (subject,)).fetchone()
         if source:
-            metadata = json.loads(source[0])
+            metadata = json.loads(source['metadata'])
             if metadata.get("private"):
                 self.require_repository(subject)
             payload = dict(payload, repository_label=(metadata.get("owner", "") + "/" if metadata.get("owner") else "") + metadata.get("display_name", subject))
+        if kind == 'refresh':
+            if source is None:
+                raise ValueError('A managed repository is required for Refresh.')
+            self.require_repository(subject)
+            for row in db.execute("SELECT * FROM jobs WHERE status IN ('queued','running')"):
+                job = self.job_record(row)
+                if job['kind'] not in REPOSITORY_ACTIONS or not affects_repository(job, source):
+                    continue
+                inputs = {k:v for k,v in job['payload'].items() if k != 'repository_label'}
+                wanted = {k:v for k,v in payload.items() if k != 'repository_label'}
+                if job['kind'] == 'refresh' and inputs == wanted and not job['cancel']:
+                    return job
+                raise Conflict('Another action already uses this repository: '+job['id'])
+        elif kind in REPOSITORY_ACTIONS and kind != 'connection_delete':
+            for row in db.execute("SELECT j.*,r.connection_id AS refresh_connection FROM jobs j JOIN repositories r ON r.name=j.subject WHERE j.kind='refresh' AND j.status IN ('queued','running')"):
+                target = {'name':row['subject'], 'connection_id':row['refresh_connection']}
+                if affects_repository({'kind':kind,'subject':subject,'payload':payload}, target):
+                    raise Conflict('This repository is being refreshed. Retry after the refresh finishes.')
         if kind != "connection_delete":
             from .connections import referenced
             candidate = {"kind": kind, "subject": subject, "payload": payload}
@@ -310,7 +343,7 @@ class Store:
         if subject is not None:
             clauses.append("subject=?")
             args.append(subject)
-        categories = {"all": "", "repositories": "kind IN ('catalog','download','update','download_all','update_all','check','connection_delete')",
+        categories = {"all": "", "repositories": "kind IN ('refresh','catalog','download','update','download_all','update_all','check','connection_delete')",
                       "tools": "(kind GLOB 'tools_*' OR kind GLOB 'sdk_*')", "builds": "kind IN ('build','build_publish')", "releases": "kind='release'"}
         if category not in categories:
             raise ValueError("Unknown log category.")
@@ -322,6 +355,11 @@ class Store:
         where, args = self.job_filter(subject, category)
         with self.connect() as db:
             rows = db.execute("SELECT * FROM jobs" + where + " ORDER BY created DESC,rowid DESC LIMIT ? OFFSET ?", args + [limit, offset]).fetchall()
+        return [self.job_record(row) for row in rows]
+
+    def active_jobs(self):
+        with self.connect() as db:
+            rows = db.execute("SELECT * FROM jobs WHERE status IN ('queued','running') ORDER BY created,rowid").fetchall()
         return [self.job_record(row) for row in rows]
 
     def job_count(self, subject=None, *, category="all"):

@@ -134,7 +134,7 @@ def persist(store, repo, connection, payload):
                    (repo['name'], key, time.time(), json.dumps(payload)))
 
 
-def refresh(context, name):
+def refresh(context, name, *, raise_network_errors=False):
     store = context.store
     repo = store.require_repository(name)
     connection = connections.get(store, repo['connection_id'])
@@ -162,6 +162,9 @@ def refresh(context, name):
             result['targets'].append(dict(item, id=module['id'], version=module['version']))
     except (GitHubFailure, ValueError, KeyError) as error:
         result['targets'] = [dict(state('unknown', str(error)), id=module['id'], version=module['version']) for module in modules]
+        if raise_network_errors and isinstance(error, GitHubFailure):
+            persist(store, repo, connection, result)
+            raise
     persist(store, repo, connection, result)
     return result
 
@@ -180,10 +183,11 @@ def view(store, repo, *, schedule=False, force=False):
     with store.connect() as db:
         row = db.execute('SELECT * FROM github_release_status WHERE repository_name=?', (repo['name'],)).fetchone()
         running = db.execute("SELECT id FROM jobs WHERE kind='build_publish' AND subject=? AND status IN ('queued','running') AND cancel=0", (repo['name'],)).fetchone()
+        refreshing = db.execute("SELECT id FROM jobs WHERE kind='refresh' AND subject=? AND status IN ('queued','running')", (repo['name'],)).fetchone()
     data = json.loads(row['payload']) if row else {}
     complete = {item['id'] for item in data.get('targets', [])} == {item['id'] for item in modules}
     valid = row is not None and row['signature'] == key and time.time()-row['checked_at'] < CACHE_SECONDS and complete
-    if not reason and (force or not valid) and schedule and not running:
+    if not reason and (force or not valid) and schedule and not running and not refreshing:
         with store.connect() as db:
             pending = db.execute("SELECT id,payload FROM jobs WHERE kind='github_status' AND subject=? AND status IN ('queued','running') AND cancel=0", (repo['name'],)).fetchone()
         if pending and json.loads(pending['payload']).get('signature') != key:
@@ -224,14 +228,19 @@ def enqueue(store, value):
     selected = next((m for m in build_targets.targets(repo) if m['id'] == payload['target']), None)
     if selected is None: raise ValueError('Choose a production build target.')
     module = build_targets.pinned(store, repo, payload['module'], payload['commit'])
-    status = view(store, repo, schedule=True)
-    current = next(item for item in status['targets'] if item['id'] == module['id'])
-    if not current['enabled']: raise Conflict(current['reason'])
-    if module['version'] != current['version']: raise Conflict('The manifest version changed. Refresh before building.')
     connection = connections.get(store, repo['connection_id'])
     payload.update(module=module, github_release=True, connection_id=repo['connection_id'], connection_revision=connection['revision'],
                    repository_id=repo['id'], repository_owner=repo['owner'], repository_slug=repo['display_name'])
     payload['fingerprint'] = build_targets.fingerprint(payload)
+    status = view(store, repo, schedule=True)
+    current = next(item for item in status['targets'] if item['id'] == module['id'])
+    if status['job_id']:
+        existing = store.job(status['job_id'])
+        inputs = {key:value for key,value in existing['payload'].items() if key != 'repository_label'}
+        if existing['status'] in ('queued','running') and not existing['cancel'] and inputs == payload:
+            return existing
+    if not current['enabled']: raise Conflict(current['reason'])
+    if module['version'] != current['version']: raise Conflict('The manifest version changed. Refresh before building.')
     return store.enqueue('build_publish', repo['name'], payload)
 
 

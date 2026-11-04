@@ -14,9 +14,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from r4os_server.workspace import catalog, releases, testconfigs, connections, layout, repo_metadata
+from r4os_server.workspace import catalog, releases, testconfigs, connections, layout, repo_metadata, worker
 from r4os_server.workspace.process import Context
-from r4os_server.workspace.store import Store, under
+from r4os_server.workspace.store import Conflict, Store, under
 from r4os_server.workspace.builds import private_libraries
 from r4os_server.workspace.toolsets import clone_snapshot
 
@@ -228,6 +228,95 @@ class WorkspaceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             catalog.update(context, "r4os-app-example")
         self.assertEqual(target.read_text(), "keep my work\n")
+        self.store.change_job(context.job['id'],status='completed')
+        checkout=target.parent;head=context.git(checkout,'rev-parse','HEAD')[0].strip()
+        remote='https://github.com/R4OSDev/r4os-app-example.git'
+        context.git(checkout,'remote','set-url','origin',remote)
+        item={'id':10,'name':'r4os-app-example','owner':{'login':'R4OSDev'},'private':False,'default_branch':'main','description':'Refreshed metadata'}
+        def refresh_one():
+            current=self.context('refresh','r4os-app-example')
+            def network(repo,*args,**kwargs):
+                changed=list(args)
+                changed=[source.as_uri() if value in (remote,'origin') else value for value in changed]
+                return current.run(['git',*changed],**kwargs)
+            with patch.object(catalog,'public_json',return_value=(item,{})),patch.object(current,'repository_git',side_effect=network):
+                result=worker.execute(current)
+            self.store.change_job(current.job['id'],status='completed',result=result)
+            return result
+        self.assertEqual(refresh_one()['local']['status'],'modified')
+        self.assertEqual(target.read_text(),'keep my work\n');self.assertEqual(context.git(checkout,'rev-parse','HEAD')[0].strip(),head)
+        target.write_text('two\n');(source/'README.md').write_text('three\n');git('commit','-am','third')
+        refreshed=refresh_one()
+        self.assertEqual(refreshed['local']['status'],'outdated')
+        self.assertEqual(refreshed['local']['remote_commit'],git('rev-parse','HEAD'))
+        self.assertEqual(target.read_text(),'two\n');self.assertEqual(context.git(checkout,'rev-parse','HEAD')[0].strip(),head)
+
+    def test_single_refresh_scopes_public_private_metadata_and_release_cache(self):
+        self.seed('same')
+        other=connections.save(self.store,{'url':'https://github.com/OtherOwner','token':'fixture-private-token'})
+        name=other['id']+'.22'
+        meta={'id':22,'name':name,'display_name':'same','owner':'OtherOwner','private':True,'read_access':True,'access_revision':other['revision'],'default_branch':'main','url':'https://github.com/OtherOwner/same','clone_url':'https://github.com/OtherOwner/same.git'}
+        with self.store.connect() as db:
+            db.execute('INSERT INTO repositories(name,github_id,metadata,connection_id,directory,enabled) VALUES(?,?,?,?,?,1)',(name,22,json.dumps(meta),other['id'],other['directory']+'/same'))
+            for key in ('same',name):db.execute('INSERT INTO github_release_status VALUES(?,?,?,?)',(key,'old-signature',1,json.dumps({'unchanged':key})))
+        original_catalog=connections.get(self.store,'main')['catalog']
+        item={'id':10,'name':'same','owner':{'login':'R4OSDev'},'private':False,'default_branch':'main','description':'New description'}
+        context=self.context('refresh','same')
+        with patch.object(catalog,'public_json',return_value=(item,{})) as request:
+            result=worker.execute(context)
+        self.store.change_job(context.job['id'],status='completed',result=result)
+        self.assertEqual(request.call_count,1);self.assertEqual(request.call_args.args,('https://api.github.com/repos/R4OSDev/same',''))
+        self.assertEqual(result['local']['status'],'missing');self.assertFalse(catalog.repository_path(self.store,self.store.repository('same')).exists())
+        self.assertEqual(self.store.repository('same')['description'],'New description')
+        self.assertEqual(connections.get(self.store,'main')['catalog'],original_catalog)
+        with self.store.connect() as db:
+            self.assertIsNone(db.execute('SELECT * FROM github_release_status WHERE repository_name=?',('same',)).fetchone())
+            self.assertIsNotNone(db.execute('SELECT * FROM github_release_status WHERE repository_name=?',(name,)).fetchone())
+        private=dict(item,id=22,owner={'login':'OtherOwner'},private=True,description='Private description')
+        context=self.context('refresh',name)
+        with patch.object(catalog,'public_json',side_effect=[(private,{}),([],{})]) as request:
+            result=worker.execute(context)
+        self.store.change_job(context.job['id'],status='completed',result=result)
+        self.assertEqual([call.args[1] for call in request.call_args_list],['fixture-private-token']*2)
+        self.assertTrue(all('/OtherOwner/same' in call.args[0] for call in request.call_args_list))
+        self.assertEqual(self.store.repository(name)['description'],'Private description')
+        self.assertEqual(self.store.repository('same')['description'],'New description')
+        snapshot=self.store.repository(name)['local'].copy()
+        context=self.context('refresh',name)
+        with patch.object(catalog,'public_json',side_effect=catalog.GitHubError(401,'Token rejected')):
+            with self.assertRaisesRegex(catalog.GitHubError,'Token rejected'):worker.execute(context)
+        self.store.change_job(context.job['id'],status='failed',error='Token rejected')
+        self.assertEqual(self.store.repository(name)['local'],snapshot)
+        self.assertEqual(self.store.repository(name)['refresh_job']['error'],'Token rejected')
+        context=self.context('refresh',name)
+        def changed(url,token):
+            if '/branches?' in url:
+                return [],{}
+            with self.store.connect() as db:db.execute('UPDATE connections SET revision=revision+1 WHERE id=?',(other['id'],))
+            return private,{}
+        with patch.object(catalog,'public_json',side_effect=changed):
+            with self.assertRaises(Conflict):worker.execute(context)
+        self.assertEqual(self.store.repository(name)['description'],'Private description')
+
+    def test_single_refresh_queue_deduplicates_and_locks_only_affected_repositories(self):
+        self.seed('same')
+        with self.store.connect() as db:
+            db.execute('INSERT INTO repositories(name,github_id,metadata,directory) VALUES(?,?,?,?)',('other',11,json.dumps({'id':11,'name':'other','owner':'R4OSDev','display_name':'other'}),'Main/other'))
+        with ThreadPoolExecutor(max_workers=6) as pool:jobs=list(pool.map(lambda _:self.store.enqueue('refresh','same'),range(6)))
+        self.assertEqual(len({job['id'] for job in jobs}),1)
+        for kind in ('download','update','check','build','build_publish'):
+            with self.assertRaises(Conflict):self.store.enqueue(kind,'same')
+        with self.assertRaises(Conflict):self.store.enqueue('catalog')
+        isolated=connections.save(self.store,{'url':'https://github.com/IsolatedOwner'})
+        self.store.enqueue('catalog','',{'connection_id':isolated['id']})
+        allowed=self.store.enqueue('download','other')
+        with self.assertRaises(Conflict):self.store.enqueue('refresh','other')
+        self.store.cancel_job(allowed['id']);self.store.enqueue('refresh','other')
+        for index in range(35):self.store.enqueue('github_status','unrelated-'+str(index))
+        self.assertNotIn(jobs[0]['id'],{job['id'] for job in self.store.jobs()})
+        self.assertIn(jobs[0]['id'],{job['id'] for job in self.store.active_jobs()})
+        self.assertEqual(self.store.repository('same')['refresh_job']['id'],jobs[0]['id'])
+        self.assertEqual(self.store.job_count(category='repositories'),4)
 
     def test_bulk_updates_pin_targets_and_preserve_changes_while_waiting(self):
         from r4os_server.workspace.worker import execute

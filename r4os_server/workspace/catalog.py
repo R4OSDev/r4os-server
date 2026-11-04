@@ -5,9 +5,9 @@ import shutil
 import time
 import urllib.error
 import urllib.request
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
-from .store import identifier, now, under
+from .store import Conflict, identifier, now, under
 from . import connections, layout
 
 
@@ -133,6 +133,79 @@ def refresh(context, connection_id="main"):
 
 def repository_path(store, repo):
     return layout.repository_path(store, repo)
+
+
+def refresh_repository(context, name, expected):
+    """Refresh one registered identity without discovering or updating its peers."""
+    store = context.store
+    repo = store.require_repository(name)
+    connection = connections.get(store, repo['connection_id'])
+    if (expected.get('connection_id', connection['id']) != connection['id']
+            or expected.get('connection_revision', connection['revision']) != connection['revision']):
+        raise Conflict('The connection changed while this refresh was queued. Refresh the repository again.')
+    credential = connections.token(store, connection['id'])
+    context.phase('Refreshing repository metadata: '+repo['owner']+'/'+repo['display_name'])
+    endpoint = 'https://api.github.com/repos/'+quote(repo['owner'], safe='')+'/'+quote(repo['display_name'], safe='')
+    try:
+        item, _ = public_json(endpoint, credential)
+    except GitHubError as error:
+        if error.status == 404:
+            raise ValueError('GitHub could not find this repository or the connection token no longer has access.') from None
+        raise
+    if (not isinstance(item, dict) or item.get('id') != repo['id']
+            or item.get('owner', {}).get('login', '').casefold() != connection['owner'].casefold()):
+        raise Conflict('The GitHub repository identity or owning account changed. Refresh its connection catalogue.')
+    slug = identifier(item['name'])
+    endpoint = 'https://api.github.com/repos/'+quote(connection['owner'], safe='')+'/'+quote(slug, safe='')
+    readable, access_error = True, ''
+    if item.get('private'):
+        if not credential:
+            readable, access_error = False, 'A connection token with Contents read access is required.'
+        else:
+            try:
+                branches, _ = public_json(endpoint+'/branches?per_page=1', credential)
+                if not isinstance(branches, list):
+                    raise ValueError('GitHub returned an invalid repository branch list.')
+            except GitHubError as error:
+                if error.status not in (403,404) or error.rate_limited:
+                    raise
+                readable, access_error = False, 'The token cannot read this repository. Check its Contents permission and refresh the connection.'
+    context.check()
+    with store.connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        latest = connections.get(store, connection['id'], db=db)
+        row = db.execute('SELECT * FROM repositories WHERE name=?', (name,)).fetchone()
+        if (latest['revision'] != connection['revision'] or latest['status'] != 'ready' or row is None
+                or row['connection_id'] != connection['id'] or row['github_id'] != repo['id'] or not row['enabled']):
+            raise Conflict('The connection or repository selection changed during the refresh. Refresh again.')
+        metadata = json.loads(row['metadata'])
+        became_private = not metadata.get('private') and bool(item.get('private'))
+        metadata.update(display_name=slug, owner=connection['owner'], description=item.get('description') or '',
+                        url='https://github.com/'+connection['owner']+'/'+slug,
+                        clone_url='https://github.com/'+connection['owner']+'/'+slug+'.git',
+                        default_branch=item['default_branch'], language=item.get('language'),
+                        archived=bool(item.get('archived')), disabled=bool(item.get('disabled')),
+                        size_kib=item.get('size', 0), pushed_at=item.get('pushed_at'), fetched_at=now(),
+                        private=bool(item.get('private')), visibility='private' if item.get('private') else 'public',
+                        read_access=readable, access_revision=connection['revision'], access_error=access_error,
+                        permissions={key:bool(value) for key,value in item.get('permissions', {}).items() if key in ('pull','push','admin')})
+        db.execute('UPDATE repositories SET metadata=?,enabled=? WHERE name=?',
+                   (json.dumps(metadata, ensure_ascii=False), 0 if became_private else row['enabled'], name))
+        db.execute('DELETE FROM github_release_status WHERE repository_name=?', (name,))
+    if became_private:
+        raise Conflict('The repository is now private. Enable it explicitly in its connection settings.')
+    if not readable:
+        raise ValueError(access_error)
+    context.phase('Checking the selected repository source status')
+    local = inspect(context, name, remote=True)
+    if local['status'] == 'missing':
+        from .apps import refresh as refresh_app
+        refresh_app(store, store.require_repository(name))
+    if local['status'] in ('unknown','conflict') and local.get('detail'):
+        raise RuntimeError('Repository source status could not be refreshed: '+local['detail'])
+    from .github_build import refresh as refresh_release
+    release = refresh_release(context, name, raise_network_errors=True)
+    return {'repository':name, 'local':local, 'github_release_status':release}
 
 
 def reconcile_missing(store):

@@ -289,6 +289,11 @@ h3 { font-size: 13px; font-weight: 550; margin: 24px 0 12px; }
 .page-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; min-width: 0; margin-left: auto; }
 .button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 9px 13px; border: 1px solid #37434a; border-radius: 6px; background: #242e34; color: #d5dfe4; font-size: 11px; line-height: 1.4; white-space: nowrap; }
 .button-icon { width: 14px; height: 14px; flex: 0 0 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.button.is-loading .button-icon { animation: repository-refresh-spin 1s linear infinite; }
+@keyframes repository-refresh-spin { to { transform: rotate(360deg); } }
+.repository-refresh-message { display: flex; flex: 1 0 100%; align-items: center; gap: 12px; min-width: 0; color: #f1aaa1; font-size: 12px; }
+.repository-refresh-message > span { min-width: 0; overflow-wrap: anywhere; }
+@media(prefers-reduced-motion:reduce) { .button.is-loading .button-icon { animation: none; } }
 .page-toolbar .button { border-color: transparent; background: transparent; }
 .page-toolbar .button.primary:not(:disabled) { background: #294736; border-color: #426c51; }
 .button:hover { border-color: #6e8e7c; background: #2b3a33; }
