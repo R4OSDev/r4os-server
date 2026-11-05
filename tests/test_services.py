@@ -284,7 +284,8 @@ class ServiceTests(unittest.TestCase):
             try:
                 client.request(method,path,body=None if body is None else json.dumps(body),headers=headers)
                 response=client.getresponse()
-                return response.status,json.loads(response.read())
+                payload=response.read()
+                return response.status,(json.loads(payload) if response.getheader('Content-Type','').startswith('application/json') else payload)
             finally:
                 client.close()
         from test_benchmarks import CLAIM_ID, claim_document
@@ -292,10 +293,35 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual(request(updates,'/catalog.json')[0],401)
         self.assertEqual(request(software,'/api/v1/packages')[0],401)
         self.assertEqual(request(benchmark,claim_route,'POST',claim_document(),config.benchmark_token)[0],401)
+        bootstrap='/api/v1/registration/bootstrap'
+        self.assertEqual(request(private_software,bootstrap,'POST',hostname='127.0.0.1')[0],404)
+        self.assertEqual(request(software,bootstrap)[0],405)
+        status,document=request(software,bootstrap,'POST')
+        self.assertEqual(status,201)
+        fields=dict(line.split('=',1) for line in document.decode('ascii').splitlines())
+        self.assertEqual((fields['SCHEMA'],fields['VERSION'],fields['SCOPE']),
+                         ('R4OS_PUBLIC_REGISTRATION','1','REGISTRATION_READ'))
+        token=fields['REGISTRATION_SECRET']
+        self.assertEqual(len(token),69)
+        self.assertNotEqual(token,config.registration_secret)
+        # Issuance alone does not register an address or confer any write role.
+        self.assertNotIn('127.0.0.3',{item['ip'] for item in self.registration.store.list_allowed()})
         with socket.create_connection(registration.server_address,source_address=('127.0.0.3',0),timeout=3) as raw:
             with context.wrap_socket(raw,server_hostname='127.0.0.2') as client:
-                client.sendall(config.registration_secret.encode())
+                for fragment in (token[:2],token[2:31],token[31:]):
+                    client.sendall(fragment.encode('ascii'));time.sleep(.01)
                 self.assertEqual(client.recv(2),b'OK')
+        self.assertEqual(request(benchmark,claim_route,'POST',claim_document(),token)[0],401)
+        # A deliberately overlapping legacy prefix remains unframed-compatible.
+        registration.magic_number=b'R4C1_'+b'1'*80
+        with socket.create_connection(registration.server_address,source_address=('127.0.0.3',0),timeout=3) as raw:
+            with context.wrap_socket(raw,server_hostname='127.0.0.2') as client:
+                for fragment in (registration.magic_number[:3],registration.magic_number[3:69],registration.magic_number[69:]):
+                    client.sendall(fragment);time.sleep(.01)
+                self.assertEqual(client.recv(2),b'OK')
+        with patch.object(software.bootstrap_limiter,'allow',return_value=False):
+            self.assertEqual(request(software,bootstrap,'POST')[0],429)
+        self.assertEqual(request(software,bootstrap,'POST',{'unexpected':'body'})[0],413)
         self.assertEqual(request(updates,'/catalog.json')[0],200)
         self.assertEqual(request(software,'/api/v1/packages')[0],200)
         self.assertEqual(request(private_software,'/api/v1/packages',hostname='127.0.0.1')[0],200)
@@ -324,6 +350,8 @@ class ServiceTests(unittest.TestCase):
                 insecure.request('GET','/api/health')
         finally:
             insecure.close()
+        self.registration.store.block_ip('127.0.0.3','fixture',60)
+        self.assertEqual(request(software,bootstrap,'POST')[0],403)
 
     def wait_upload(self,identifier):
         deadline=time.monotonic()+5

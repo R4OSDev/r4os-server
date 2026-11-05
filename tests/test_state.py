@@ -6,6 +6,30 @@ from r4os_server.registration.state import AccessDecision, StateStore
 
 
 class StateStoreTest(unittest.TestCase):
+    def test_installation_credentials_are_hashed_scoped_and_quota_bounded(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import hashlib
+        with tempfile.TemporaryDirectory() as directory:
+            store=StateStore(Path(directory)/'state.sqlite3',60)
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                tokens=list(pool.map(lambda _: store.issue_client('192.0.2.10',now=10000),range(65)))
+            issued=[value for value in tokens if value is not None]
+            self.assertEqual(len(issued),64);self.assertEqual(len(set(issued)),64)
+            self.assertEqual(store.list_allowed(),[])
+            with store._connect() as db:
+                rows=[tuple(row) for row in db.execute('SELECT digest, issued_ip, issued_at FROM client_credentials')]
+                audit=' '.join(row[0] for row in db.execute('SELECT note FROM audit'))
+            self.assertEqual({row[0] for row in rows},{hashlib.sha256(token.encode()).hexdigest() for token in issued})
+            self.assertNotIn(issued[0],audit)
+            self.assertTrue(store.register_client('192.0.2.11',issued[0].encode()))
+            self.assertFalse(store.register_client('192.0.2.11',b'R4C1_'+b'0'*64))
+            store.block_ip('192.0.2.11','fixture',60)
+            self.assertFalse(store.register_client('192.0.2.11',issued[0].encode()))
+            self.assertIsNone(store.issue_client('192.0.2.11'))
+            self.assertIsNotNone(store.issue_client('192.0.2.10',now=13601))
+            reopened=StateStore(Path(directory)/'state.sqlite3',60)
+            self.assertTrue(reopened.register_client('192.0.2.12',issued[0].encode()))
+
     def test_magic_registration_and_expiring_block(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = StateStore(Path(directory) / "state.sqlite3", 60)

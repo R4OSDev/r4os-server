@@ -43,17 +43,25 @@ class AuthenticationHandler(socketserver.BaseRequestHandler):
         self.request.settimeout(5.0)
         received = bytearray()
         try:
-            while len(received) <= len(self.server.magic_number) + 2:
-                chunk = self.request.recv(len(self.server.magic_number) + 3 - len(received))
+            while len(received) < 259:
+                chunk = self.request.recv(259 - len(received))
                 if not chunk:
                     break
                 received.extend(chunk)
                 candidate = bytes(received)
                 if b"\n" in candidate:
                     break
-                if len(candidate) == len(self.server.magic_number):
+                if len(candidate) == len(self.server.magic_number) and hmac.compare_digest(candidate, self.server.magic_number):
                     break
-                if len(candidate) > len(self.server.magic_number) and candidate != self.server.magic_number + b"\r":
+                # Both the original unframed secret and v1 installation
+                # tokens have known lengths. Prefix fragments must not be
+                # mistaken for a short legacy credential.
+                if candidate.startswith(b"R4C1_"):
+                    if len(candidate) >= 69:
+                        if len(candidate) < len(self.server.magic_number) and self.server.magic_number.startswith(candidate):
+                            continue
+                        break
+                elif not b"R4C1_".startswith(candidate) and len(candidate) >= len(self.server.magic_number):
                     break
         except (TimeoutError, socket.timeout, OSError):
             pass
@@ -62,20 +70,22 @@ class AuthenticationHandler(socketserver.BaseRequestHandler):
             candidate = candidate[:-2]
         elif candidate.endswith(b"\n"):
             candidate = candidate[:-1]
-        if len(candidate) == len(self.server.magic_number) and hmac.compare_digest(candidate, self.server.magic_number):
-            if self.server.store.register_magic(source_ip):
+        legacy = len(candidate) == len(self.server.magic_number) and hmac.compare_digest(candidate, self.server.magic_number)
+        accepted = (self.server.store.register_magic(source_ip) if legacy else
+                    bool(getattr(self.server, "public_listener", False)) and self.server.store.register_client(source_ip, candidate))
+        if accepted:
+            try:
+                self.request.sendall(b"OK")
+                # Keep the successful half of the connection open until
+                # the client consumes OK and closes. R4OS currently
+                # reports a payload immediately followed by peer FIN as
+                # peer_closed, so closing here could hide a valid reply.
+                self.request.settimeout(1.0)
                 try:
-                    self.request.sendall(b"OK")
-                    # Keep the successful half of the connection open until
-                    # the client consumes OK and closes. R4OS currently
-                    # reports a payload immediately followed by peer FIN as
-                    # peer_closed, so closing here could hide a valid reply.
-                    self.request.settimeout(1.0)
-                    try:
-                        self.request.recv(1)
-                    except (TimeoutError, socket.timeout, OSError):
-                        pass
-                except OSError:
+                    self.request.recv(1)
+                except (TimeoutError, socket.timeout, OSError):
                     pass
-                return
+            except OSError:
+                pass
+            return
         self.server.store.block_ip(source_ip, "invalid-magic-number", self.server.block_seconds)

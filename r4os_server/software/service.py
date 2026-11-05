@@ -9,6 +9,8 @@ from urllib.parse import urlsplit, unquote
 from ..common.access import AccessPolicy
 from ..common.http import Handler as BaseHandler, HTTPError, LANHTTPServer, configure_server
 from ..registration.state import StateStore
+from ..registration import bootstrap
+from ..common.rate_limit import PerIpRateLimiter
 from .catalog import Catalog
 
 
@@ -16,6 +18,8 @@ class Handler(BaseHandler):
     def route(self):
         try:
             path = urlsplit(self.path).path
+            if path == bootstrap.PATH:
+                return bootstrap.issue(self)
             if self.command not in ('GET', 'HEAD'):
                 raise HTTPError(405, 'method_not_allowed')
             if path == '/api/health':
@@ -57,6 +61,7 @@ def create_server(config):
     server.catalog = Catalog(server.workspace_root)
     access = StateStore(config.data_dir/'registration/state.sqlite3', 60)
     server.policy = AccessPolicy(config, access, 'software')
+    server.bootstrap_limiter = PerIpRateLimiter(lambda: access.get_rate('registration'))
     server.version = (Path(__file__).resolve().parents[2]/'VERSION').read_text().strip()
     try:
         return configure_server(server, config)
@@ -69,6 +74,7 @@ def create_public_server(config, private):
     server = LANHTTPServer((config.public_api_host, config.software_port), Handler)
     server.workspace_root, server.policy, server.version = private.workspace_root, private.policy, private.version
     server.catalog = private.catalog
+    server.bootstrap_limiter = private.bootstrap_limiter
     try:
         return configure_server(server, config, public=True)
     except BaseException:

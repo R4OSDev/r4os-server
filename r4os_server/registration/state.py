@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from enum import Enum
 from contextlib import contextmanager
 import ipaddress
+import hashlib
+import secrets
 import json
 from pathlib import Path
 import sqlite3
@@ -103,6 +105,13 @@ class StateStore:
                     note TEXT NOT NULL,
                     created_at REAL NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS client_credentials (
+                    digest TEXT PRIMARY KEY,
+                    issued_ip TEXT NOT NULL,
+                    issued_at REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS client_credentials_issuance
+                    ON client_credentials(issued_ip, issued_at);
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT PRIMARY KEY,
                     integer_value INTEGER NOT NULL
@@ -180,6 +189,39 @@ class StateStore:
             self._audit(connection, "authenticated", normalized, source, current)
             connection.commit()
             return True
+
+
+    def issue_client(self, ip: str, now: float | None = None) -> str | None:
+        """Issue a registration/read credential; persist only its hash.
+
+        None means the shared ban or the durable 64/hour/source quota denied
+        issuance. Previously issued installations remain valid across IP changes.
+        """
+        normalized = normalize_ip(ip)
+        current = time.time() if now is None else now
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if self._expire_block(connection, normalized, current):
+                return None
+            count = connection.execute(
+                "SELECT COUNT(*) FROM client_credentials WHERE issued_ip=? AND issued_at>?",
+                (normalized, current - 3600),
+            ).fetchone()[0]
+            if count >= 64:
+                return None
+            token = "R4C1_" + secrets.token_hex(32)
+            connection.execute("INSERT INTO client_credentials VALUES (?, ?, ?)",
+                               (hashlib.sha256(token.encode("ascii")).hexdigest(), normalized, current))
+            self._audit(connection, "client_issued", normalized, "registration-read-v1", current)
+            return token
+
+    def register_client(self, ip: str, token: bytes) -> bool:
+        if len(token) != 69 or not token.startswith(b"R4C1_") or any(c not in b"0123456789abcdef" for c in token[5:]):
+            return False
+        digest = hashlib.sha256(token).hexdigest()
+        with self._connect() as connection:
+            known = connection.execute("SELECT 1 FROM client_credentials WHERE digest=?", (digest,)).fetchone()
+        return known is not None and self.register_magic(ip, "registration-read-v1")
 
 
     def block_ip(self, ip: str, reason: str, duration_seconds: int, now: float | None = None) -> None:
