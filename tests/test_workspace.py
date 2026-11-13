@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 from r4os_server.workspace import catalog, releases, testconfigs, connections, layout, repo_metadata, worker
 from r4os_server.workspace.process import Context
@@ -445,7 +446,9 @@ class WorkspaceTests(unittest.TestCase):
                     raise catalog.GitHubError(403, "Contents permission denied")
                 return [], Message()
             owner = "R4OSDev" if "/orgs/" in url else "Example"
-            if not credential:
+            if "/users/Example/repos?" in url or "/orgs/R4OSDev/repos?type=public" in url:
+                key = "main" if owner == "R4OSDev" else extra["id"]
+                self.assertEqual(credential, connections.token(self.store, key))
                 return ([] if phase["privatized"] else [item("public", 1, owner)]), Message()
             if "page=2" in url:
                 if phase["partial"]:
@@ -506,6 +509,42 @@ class WorkspaceTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "Interrupted private"):
                 catalog.refresh(context, extra["id"])
             self.assertEqual(self.store.repositories(extra["id"], enabled_only=False), before)
+            phase.update(partial=False, denied=False)
+            catalog.refresh(context, extra['id'])
+            detail = "GitHub API rate limit reached. Retry later."
+            current = connections.get(self.store, extra["id"])
+            with self.store.connect() as db:
+                db.execute('UPDATE connections SET catalog=? WHERE id=?',
+                           (json.dumps(dict(current['catalog'], error=detail)), extra['id']))
+            unavailable = self.store.repository(secret['name'])
+            self.assertFalse(unavailable['available'])
+            self.assertTrue(unavailable['enabled'])
+            self.assertEqual(unavailable['unavailable_reason'], detail)
+            catalog.refresh(context, extra['id'])
+            self.assertTrue(self.store.require_repository(secret['name'])['available'])
+
+    def test_catalog_http_errors_distinguish_rate_limit_and_permissions(self):
+        endpoint = 'https://api.github.com/users/Example/repos?type=owner'
+        cases = [
+            (403, {'X-RateLimit-Remaining':'0', 'X-RateLimit-Reset':'1794600480'}, True,
+             'GitHub API rate limit reached. Retry later. Resets at 2026-11-13 20:08:00 UTC.'),
+            (429, {'Retry-After':'60', 'X-RateLimit-Reset':'invalid'}, True,
+             'GitHub API rate limit reached. Retry later. Retry after 60 seconds.'),
+            (403, {'X-RateLimit-Remaining':'100'}, False,
+             "GitHub denied access. Check the connection token's repository permissions and organisation access.")]
+        for status, values, limited, detail in cases:
+            with self.subTest(status=status, headers=values):
+                headers = Message()
+                for key, value in values.items():headers[key] = value
+                failure = HTTPError(endpoint,status,'Fixture failure',headers,None)
+                with patch.object(catalog.urllib.request,'build_opener') as opener:
+                    opener.return_value.open.side_effect = failure
+                    with self.assertRaises(catalog.GitHubError) as raised:
+                        catalog.public_json(endpoint,'isolated-catalog-token')
+                self.assertEqual(raised.exception.status,status)
+                self.assertEqual(raised.exception.rate_limited,limited)
+                self.assertEqual(str(raised.exception),detail)
+                self.assertNotIn('isolated-catalog-token',str(raised.exception))
 
     def test_repository_categories_survive_refresh_and_are_connection_local(self):
         extra = connections.save(self.store, {"url": "https://github.com/Example"})

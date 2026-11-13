@@ -182,8 +182,8 @@ class Store:
                 reason = "A token with read access is required. Edit the connection."
             elif value.get("access_revision") != row["connection_revision"] or not value.get("read_access"):
                 reason = value.get("access_error") or "Refresh the connection to verify private repository access."
-            elif json.loads(row["connection_catalog"]).get("error"):
-                reason = "Private access could not be verified. Refresh the connection."
+            elif error := json.loads(row["connection_catalog"]).get("error"):
+                reason = error
         value.update(available=not bool(reason), unavailable_reason=reason)
         return value
 

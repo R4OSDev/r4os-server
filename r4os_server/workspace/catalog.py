@@ -1,6 +1,6 @@
 """Public R4OSDev inventory and conservative local Git operations."""
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import shutil
 import time
@@ -43,7 +43,18 @@ def public_json(url, token=""):
         if error.code in (403, 429):
             reset = error.headers.get("X-RateLimit-Reset", "")
             limited = error.code == 429 or error.headers.get("X-RateLimit-Remaining") == "0" or bool(error.headers.get("Retry-After"))
-            raise GitHubError(error.code, "GitHub denied this request or its rate limit has been reached. Check token permissions or retry later. Reset: " + reset, limited) from None
+            if limited:
+                detail = "GitHub API rate limit reached. Retry later."
+                try:
+                    detail += " Resets at " + datetime.fromtimestamp(int(reset), timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC") + "."
+                except (ValueError, OverflowError, OSError):
+                    pass
+                retry = error.headers.get("Retry-After", "")
+                if retry.isdigit() and len(retry) <= 8:
+                    detail += " Retry after " + retry + " seconds."
+            else:
+                detail = "GitHub denied access. Check the connection token's repository permissions and organisation access."
+            raise GitHubError(error.code, detail, limited) from None
         if error.code == 404:
             raise GitHubError(404, "GitHub account not found or this token cannot access it. Check the connection address and account type.") from None
         raise GitHubError(error.code, "GitHub is currently unavailable (HTTP " + str(error.code) + ").") from None
@@ -71,7 +82,9 @@ def refresh(context, connection_id="main", *, inspect_local=True):
     context.phase("Fetching repositories: " + owner)
     kind = "orgs" if connection["account_type"] == "organisation" else "users"
     public_type = "public" if kind == "orgs" else "owner"
-    streams = [(f"https://api.github.com/{kind}/{owner}/repos?type={public_type}", "", False)]
+    # Public listings use this connection's token too, so they do not exhaust
+    # the anonymous IP quota before its private repositories can be verified.
+    streams = [(f"https://api.github.com/{kind}/{owner}/repos?type={public_type}", credential, False)]
     if credential:
         endpoint = f"https://api.github.com/orgs/{owner}/repos?type=private" if kind == "orgs" else "https://api.github.com/user/repos?visibility=private&affiliation=owner,collaborator,organization_member"
         streams.append((endpoint, credential, True))
