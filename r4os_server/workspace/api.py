@@ -68,7 +68,6 @@ def dispatch(handler):
                 return handler.json(200, {"connections": connections.list_connections(store)})
             if method == "POST":
                 saved = connections.save(store, data(handler))
-                store.enqueue("catalog", payload={"connection_id": saved["id"], "revision": saved["revision"]})
                 return handler.json(201, saved)
         if len(parts) >= 2 and parts[0] == "connections":
             key = parts[1]
@@ -78,7 +77,6 @@ def dispatch(handler):
                     return handler.json(200, {"connection": connection, "repositories": store.repositories(key, enabled_only=False)})
                 if method == "PUT":
                     saved = connections.save(store, data(handler), key)
-                    store.enqueue("catalog", payload={"connection_id": key, "revision": saved["revision"]})
                     return handler.json(200, saved)
                 if method == "DELETE":
                     return handler.json(202, connections.request_delete(store, key, data(handler).get("confirmed")))
@@ -90,7 +88,7 @@ def dispatch(handler):
             worker = store.setting("worker", {})
             repositories = store.repositories()
             for repo in repositories:
-                repo['build_release'] = github_build.view(store, repo, schedule=True)
+                repo['build_release'] = github_build.view(store, repo)
             return handler.json(200, {"repositories": repositories, "catalog": store.setting("catalog", {}),
                                       "categories": repo_metadata.CATEGORIES, "update_count": sum(bool(update_candidate(repo)) for repo in repositories),
                                       "worker": dict(worker, ready=time.time() - worker.get("heartbeat", 0) < 20),
@@ -101,7 +99,7 @@ def dispatch(handler):
             status, result = apps.request_publish(store, parts[1], data(handler))
             return handler.json(status, result)
         if len(parts) == 3 and parts[0] == 'items' and parts[2] == 'build' and read:
-            return handler.json(200, github_build.view(store, store.repository(parts[1]), schedule=True))
+            return handler.json(200, github_build.view(store, store.repository(parts[1])))
         if parts == ['build-publish'] and method == 'POST':
             return handler.json(202, github_build.enqueue(store, data(handler)))
         if len(parts) == 2 and parts[0] == "items" and read:

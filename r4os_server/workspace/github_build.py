@@ -12,7 +12,6 @@ from . import artifact_source, build_targets, builds, connections
 from .github_api import Client, GitHubFailure
 from .store import Conflict, identifier, under
 
-CACHE_SECONDS = 600
 MARKER = '<!-- r4os-server-build:'
 PUBLISHED = 'The current GitHub revision already has a verified release artifact.'
 _UNSET = object()
@@ -200,7 +199,7 @@ def refresh(context, name, *, raise_network_errors=False):
     return result
 
 
-def view(store, repo, *, schedule=False, force=False):
+def view(store, repo, *, force=False):
     connection = connections.get(store, repo['connection_id'])
     modules = build_targets.targets(repo)
     reason = ''
@@ -222,14 +221,7 @@ def view(store, repo, *, schedule=False, force=False):
     checking=bool(refreshing or pending)
     data = json.loads(row['payload']) if row else {}
     complete = {item['id'] for item in data.get('targets', [])} == {item['id'] for item in modules}
-    valid = row is not None and data.get('format')==2 and row['signature'] == key and time.time()-row['checked_at'] < CACHE_SECONDS and complete
-    eligible=repo['available'] and bool(modules or data.get('artifacts'))
-    if eligible and (connection['has_token'] or row is not None) and (force or not valid) and schedule and not running and not refreshing:
-        if pending and json.loads(pending['payload']).get('signature') != key:
-            store.cancel_job(pending['id']);pending = None
-        if not pending:
-            store.enqueue('github_status', repo['name'], {'signature': key, 'connection_id': repo['connection_id']})
-        checking=True
+    valid = row is not None and data.get('format')==2 and row['signature'] == key and complete
     cached = {item['id']: item for item in data.get('targets', [])} if valid and not force else {}
     tools_error = ''
     if not reason and modules:
@@ -237,7 +229,8 @@ def view(store, repo, *, schedule=False, force=False):
         except ValueError as error: tools_error = str(error)
     result = []
     for module in modules:
-        item = cached.get(module['id'], state('checking', 'Checking GitHub release status…'))
+        item = cached.get(module['id'], state('checking', 'Checking GitHub release status…') if checking
+                          else state('unknown', 'Refresh this repository to check GitHub release artifacts.'))
         if item['state']=='published':pass
         elif reason: item = state('blocked', reason)
         elif not module['version_valid']: item = state('blocked', 'A valid manifest version is required.')
@@ -275,7 +268,7 @@ def enqueue(store, value):
     payload.update(module=module, github_release=True, connection_id=repo['connection_id'], connection_revision=connection['revision'],
                    repository_id=repo['id'], repository_owner=repo['owner'], repository_slug=repo['display_name'])
     payload['fingerprint'] = build_targets.fingerprint(payload)
-    status = view(store, repo, schedule=True)
+    status = view(store, repo)
     current = next(item for item in status['targets'] if item['id'] == module['id'])
     if status['job_id']:
         existing = store.job(status['job_id'])

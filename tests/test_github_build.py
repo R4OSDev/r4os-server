@@ -195,7 +195,7 @@ class GitHubBuildTests(unittest.TestCase):
             db.execute('INSERT INTO repositories(name,github_id,metadata,directory) VALUES(?,?,?,?)',('other',6,json.dumps({'id':6,'name':'other','owner':'R4OSDev','display_name':'other'}),'Main/other'))
             db.execute('INSERT INTO github_release_status VALUES(?,?,?,?)',('other','keep-signature',1,'{"keep":true}'))
         job=self.store.enqueue('refresh','unusual-project');context=Context(self.store,job)
-        github_build.view(self.store,self.store.repository('unusual-project'),schedule=True,force=True)
+        github_build.view(self.store,self.store.repository('unusual-project'),force=True)
         self.assertFalse(any(item['kind']=='github_status' for item in self.store.active_jobs()))
         self.fake.tags['v0.1.0']='a'*40
         item={'id':5,'name':'unusual-project','owner':{'login':'R4OSDev'},'default_branch':'main','private':False,'description':'New repository metadata'}
@@ -252,7 +252,7 @@ class GitHubBuildTests(unittest.TestCase):
         current=self.warm();self.assertEqual(current['artifact_state'],'outdated');self.assertFalse(current['enabled'])
         with patch.object(self.fake,'request',side_effect=GitHubFailure(503,'Fixture unavailable')):current=self.warm()
         self.assertEqual(current['artifact_state'],'unknown');self.assertFalse(current['enabled'])
-        github_build.view(self.store,self.store.repository('unusual-project'),schedule=True)
+        github_build.view(self.store,self.store.repository('unusual-project'))
         self.assertEqual(self.store.active_jobs(),[])
         from r4os_server.workspace import artifact_source
         with patch.object(artifact_source,'head',side_effect=artifact_source.EmptySource('Empty GitHub source')):current=self.warm()
@@ -328,7 +328,7 @@ class GitHubBuildTests(unittest.TestCase):
         conn=connections.get(self.store,'main')
         connections.save(self.store,{'url':conn['url'],'revision':conn['revision'],'token':'changed-fake-github-token'},'main')
         info=github_build.view(self.store,self.store.repository('unusual-project'))
-        self.assertEqual(info['state'],'checking');self.assertFalse(info['enabled'])
+        self.assertEqual(info['state'],'unknown');self.assertFalse(info['enabled'])
 
     def test_duplicate_requests_share_one_job_and_recovery_preserves_published_result(self):
         self.warm()
@@ -356,8 +356,22 @@ class GitHubBuildTests(unittest.TestCase):
         with patch.object(self.fake,'request',side_effect=GitHubFailure(403,'Denied')):
             self.assertEqual(self.warm()['state'],'unknown')
         local=dict(self.local,dirty=True);self.store.local('unusual-project',local)
-        info=github_build.view(self.store,self.store.repository('unusual-project'),schedule=True)
+        info=github_build.view(self.store,self.store.repository('unusual-project'))
         self.assertFalse(info['enabled']);self.assertIn('Local changes',info['reason'])
+
+    def test_views_keep_last_known_checks_without_scheduling_or_expiry(self):
+        with patch.object(self.store,'enqueue',side_effect=AssertionError('View queued a job')):
+            info=github_build.view(self.store,self.store.repository('unusual-project'))
+            self.assertFalse(info['enabled']);self.assertFalse(info['checking']);self.assertIn('Refresh',info['reason'])
+        self.assertTrue(self.warm()['enabled'])
+        with self.store.connect() as db:db.execute('UPDATE github_release_status SET checked_at=1')
+        calls=list(self.fake.calls)
+        with patch.object(self.store,'enqueue',side_effect=AssertionError('View queued a job')):
+            for _ in range(3):self.assertTrue(github_build.view(self.store,self.store.repository('unusual-project'))['enabled'])
+            self.store.set('active_sdk','a-different-selection')
+            info=github_build.view(self.store,self.store.repository('unusual-project'))
+            self.assertFalse(info['enabled']);self.assertFalse(info['checking']);self.assertIn('Refresh',info['reason'])
+        self.assertEqual(calls,self.fake.calls)
 
     def test_old_receipt_and_changed_sdk_never_claim_published(self):
         self.publish();release=self.fake.releases['v0.1.0']
@@ -374,7 +388,7 @@ class GitHubBuildTests(unittest.TestCase):
         self.publish();from r4os_server.workspace import sdk_projects
         with self.store.connect() as db:db.execute("INSERT INTO sdk_projects VALUES(?,?,?,?)",('unusual-project',None,'[]','explicit-technical'))
         info=github_build.view(self.store,self.store.repository('unusual-project'))
-        self.assertFalse(info['enabled']);self.assertEqual(info['state'],'checking')
+        self.assertFalse(info['enabled']);self.assertEqual(info['state'],'unknown')
         with self.assertRaisesRegex(Conflict,'Technical'):self.enqueue()
         self.module['sdk_profile']=dict(self.proof,sdk_id='a-different-sdk')
         self.store.local('unusual-project',self.local)

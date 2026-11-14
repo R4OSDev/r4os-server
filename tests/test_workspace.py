@@ -14,6 +14,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
+from types import SimpleNamespace
 
 from r4os_server.workspace import catalog, releases, testconfigs, connections, layout, repo_metadata, worker
 from r4os_server.workspace.process import Context
@@ -35,6 +36,39 @@ class WorkspaceTests(unittest.TestCase):
         job = self.store.enqueue(kind, subject)
         self.store.change_job(job["id"], status="running")
         return Context(self.store, self.store.job(job["id"]))
+
+    def test_views_connection_saves_and_worker_start_do_not_refresh_github(self):
+        from r4os_server.workspace import api,sdk_api
+        self.seed('example')
+        def call(module,path,method='GET',body=None):
+            handler=SimpleNamespace(server=SimpleNamespace(workspace=self.store),path=path,command=method,
+                body=lambda:json.dumps(body or {}).encode(),json=lambda status,value:(status,value))
+            return module.dispatch(handler)
+        with patch.object(Store,'enqueue',side_effect=AssertionError('Automatic refresh queued')):
+            for path in ('/api/repositories/state','/api/repositories/items/example/build'):
+                self.assertEqual(call(api,path)[0],200)
+            for path in ('/api/sdk/releases','/api/sdk/releases?refresh=1',
+                         '/api/sdk/releases?release_url=https%3A%2F%2Fgithub.com%2FR4OSDev%2Fr4os-sdk%2Freleases%2Ftag%2Fv0.64.218'):
+                self.assertEqual(call(sdk_api,path)[0],200)
+            self.assertEqual(call(sdk_api,'/api/sdk/projects/example','PUT',
+                                 {'sdk_id':None,'libraries':[],'development_id':None})[0],200)
+            status,saved=call(api,'/api/repositories/connections','POST',{'url':'https://github.com/Example'})
+            self.assertEqual(status,201)
+            status,saved=call(api,'/api/repositories/connections/'+saved['id'],'PUT',
+                              {'url':saved['url'],'revision':saved['revision'],'token':'isolated-api-connection-token'})
+            self.assertEqual(status,200);self.assertTrue(saved['has_token'])
+            self.assertNotIn('isolated-api-connection-token',json.dumps(saved))
+            args=SimpleNamespace(root=self.store.root,config=self.root/'missing-worker-config',once=False)
+            original_open=Path.open
+            with original_open(self.store.state/'worker.lock','a') as lock:
+                def opened(path,*args,**kwargs):
+                    return lock if path==self.store.state/'worker.lock' else original_open(path,*args,**kwargs)
+                with patch.object(Path,'open',opened),patch.object(worker.argparse.ArgumentParser,'parse_args',return_value=args),patch.object(worker,'once',return_value=False),patch.object(worker.time,'sleep',side_effect=SystemExit(0)):
+                    with self.assertRaises(SystemExit):worker.main()
+        self.assertEqual(self.store.job_count(),0)
+        status,job=call(sdk_api,'/api/sdk/refresh','POST',{})
+        self.assertEqual(status,202);self.assertEqual(job['kind'],'sdk_catalog')
+        self.assertEqual(call(sdk_api,'/api/sdk/refresh','POST',{})[1]['id'],job['id'])
 
     def seed(self, name, url=None):
         metadata = {"id": 10, "name": name, "description": "Example", "url": "https://github.com/R4OSDev/" + name,

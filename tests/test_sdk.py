@@ -78,12 +78,20 @@ class SDKTests(unittest.TestCase):
         executable=self.store.root/'BuildTools/Toolsets/test-tools/Install/Toolchains/Zig/zig';executable.unlink()
         self.assertEqual(sdk_catalog.overview(self.store)['releases'][1]['state'],'download')
 
-        # HTTP-side reads schedule work; they must never perform Internet I/O.
+        # Opening/polling stale catalogues cannot create work or use GitHub.
+        cache=self.store.setting(sdk_catalog.CACHE_KEY);self.store.set(sdk_catalog.CACHE_KEY,dict(cache,attempted=0))
+        with patch.object(self.store,'enqueue',side_effect=AssertionError('Read queued work')),patch.object(sdk_catalog.catalog,'public_json',side_effect=AssertionError('WebApp attempted Internet access')):
+            self.assertFalse(sdk_catalog.overview(self.store)['catalog']['refreshing'])
+            unknown=sdk_catalog.overview(self.store,custom_url='https://github.com/R4OSDev/r4os-sdk/releases/tag/v0.64.999')
+            self.assertFalse(unknown['catalog']['refreshing'])
+            self.assertIn('Refresh',unknown['releases'][0]['reason'])
+        # Only an explicit refresh action queues a deduplicated worker job.
         with patch.object(sdk_catalog.catalog,'public_json',side_effect=AssertionError('WebApp attempted Internet access')):
-            pending=sdk_catalog.overview(self.store,refresh=True)
-            repeated=sdk_catalog.overview(self.store,refresh=True)
+            requested=sdk_catalog.request_refresh(self.store,{})
+            repeated=sdk_catalog.request_refresh(self.store,{})
+            pending=sdk_catalog.overview(self.store)
         self.assertTrue(pending['catalog']['refreshing'])
-        self.assertEqual(pending['catalog']['job_id'],repeated['catalog']['job_id'])
+        self.assertEqual(pending['catalog']['job_id'],requested['id']);self.assertEqual(requested['id'],repeated['id'])
         context=Context(self.store,self.store.job(pending['catalog']['job_id']))
         with patch.object(sdk_catalog.catalog,'public_json',return_value=([release('0.64.146',146)],{})),patch.object(sdk_catalog,'_manifest',return_value='1'*64):
             self.assertEqual(worker.execute(context)['release_count'],1)

@@ -296,7 +296,8 @@
     environments.innerHTML=sdkTools.toolsets.length?U.table(['SDK','State','Installed tools'],sdkTools.toolsets.map(item=>[E(sdkTools.packages.find(pkg=>pkg.id===item.sdk_id)?.version||item.sdk_id)+'<br><small class="muted">'+E(item.id)+'</small>',E(item.id===sdkTools.active?'Active':states[item.status]||item.status),E((item.installed_tools||[]).join(', ')||'—')])):'<p class="muted">No SDK environments installed.</p>';
   }
   async function readSdk(ctx,refresh=false,custom=sdkCustom,reloadTools=true){
-    const request=++sdkRequest,query=new URLSearchParams();if(refresh)query.set('refresh','1');if(custom)query.set('release_url',custom);
+    const request=++sdkRequest,query=new URLSearchParams();if(custom)query.set('release_url',custom);
+    if(refresh)await sdk('refresh',{method:'POST',body:{}});
     const [data,tools]=await Promise.all([sdk('releases'+(query.size?'?'+query:'')),reloadTools?sdk('tools'):Promise.resolve(null)]);
     if(request!==sdkRequest||ctx.generation!==U.generation)return null;
     if(tools)sdkTools=tools;
@@ -534,6 +535,7 @@
     if(event.target.id==='sdk-custom-url'){
       event.preventDefault();const form=event.target,submit=form.querySelector('[type=submit]'),ctx=U.current,url=new FormData(form).get('release_url').trim();submit.disabled=true;
       try{
+        await sdk('refresh',{method:'POST',body:{release_url:url}});
         if(await readSdk(ctx,false,url)){
           sdkCustom=url;sdkChoice=url;sdkStored('sdk-custom',url);sdkStored('sdk-release',url);sdkError='';
           document.querySelector('#detail-dialog')?.close();applySdk();pollSdk(ctx);
@@ -561,7 +563,7 @@
           job=await api('tools/actions/install',{method:'POST',body:{sdk_id:values.get('sdk_id'),tools:values.getAll('tools')}});
         }
         else if(form.id==='sdk-development')job=await sdk('development',{method:'POST',body:Object.fromEntries(values)});
-        else{await sdk('projects/'+encodeURIComponent(form.dataset.name),{method:'PUT',body:{sdk_id:values.get('sdk_id')||null,libraries:JSON.parse(values.get('libraries')),development_id:values.get('development_id')||null}});U.status('SDK settings saved.');return;}
+        else{await sdk('projects/'+encodeURIComponent(form.dataset.name),{method:'PUT',body:{sdk_id:values.get('sdk_id')||null,libraries:JSON.parse(values.get('libraries')),development_id:values.get('development_id')||null}});U.status('SDK settings saved. Refresh the repository to validate the selection.');return;}
         await showJob(job.id);
       }catch(error){form.querySelector('.form-message').textContent=error.message;}finally{submit.disabled=false;}return;
     }

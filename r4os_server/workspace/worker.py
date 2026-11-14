@@ -171,8 +171,6 @@ def main():
         return
     while True:
         store.set("worker", {"heartbeat": time.time(), "job": None})
-        if not store.setting("catalog"):
-            store.enqueue("catalog")
         if not once(store):
             time.sleep(1)
 

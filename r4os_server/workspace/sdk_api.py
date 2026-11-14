@@ -48,13 +48,16 @@ def dispatch(handler):
         if parts == ['selection'] and handler.command == 'POST':
             from .sdk_install import request
             return handler.json(202, store.enqueue('sdk_select', 'sdk', request(data(handler))))
+        if parts == ['refresh'] and handler.command == 'POST':
+            from .sdk_catalog import request_refresh
+            return handler.json(202, request_refresh(store, data(handler)))
         if parts == ['releases'] and read:
             from .sdk_catalog import overview
             query = parse_qs(urlsplit(handler.path).query)
             custom = query.get('release_url', [None])[0]
             if custom:
                 sdk_packages.release_base(custom)
-            return handler.json(200, overview(store, refresh=query.get('refresh') == ['1'], custom_url=custom))
+            return handler.json(200, overview(store, custom_url=custom))
         if read and parts and parts[0] in ('catalog','assets','packages'):
             return client_download(handler,store.root/'BuildTools',path)
         if parts == ['imports']:
@@ -70,8 +73,7 @@ def dispatch(handler):
         if len(parts)==2 and parts[0]=='projects':
             if read: return handler.json(200,sdk_projects.get(store,parts[1]))
             if handler.command=='PUT':
-                result=sdk_projects.save(store,parts[1],data(handler));store.enqueue('check',parts[1],{'profile_refresh':True})
-                return handler.json(200,result)
+                return handler.json(200,sdk_projects.save(store,parts[1],data(handler)))
         if parts==['development'] and handler.command=='POST':
             return handler.json(202,store.enqueue('sdk_develop','sdk',data(handler)))
         if len(parts)==3 and parts[:1]==['packages'] and parts[2]=='verify' and handler.command=='POST':

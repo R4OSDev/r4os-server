@@ -92,7 +92,7 @@
         form.elements.token.value='';
         const hash='#repositories/connections/'+saved.id;
         if(location.hash===hash)await refresh();else location.hash=hash;
-        U.status('Connection saved. Catalogue refresh queued.');
+        U.status('Connection saved. Use Refresh catalogue to verify access and load repositories.');
       }
     }catch(error){form.querySelector('.form-message').textContent=error.message;U.status(error.message,true);}finally{node.disabled=false;}
   });

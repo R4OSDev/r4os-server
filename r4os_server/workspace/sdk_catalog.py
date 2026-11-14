@@ -199,13 +199,22 @@ def refresh_job(context, value):
     return {'updated':cache['updated'], 'release_count':len(cache['releases'])}
 
 
-def overview(store, *, refresh=False, custom_url=None):
+def request_refresh(store, value):
+    if not isinstance(value, dict) or set(value) - {'release_url'}:
+        raise ValueError('Choose a catalogue refresh or one SDK release_url.')
+    if 'release_url' in value:
+        url = value['release_url']
+        if not isinstance(url, str) or not url:
+            raise ValueError('Specify an official SDK release URL.')
+        sdk_packages.release_base(url)
+        subject = 'sdk-custom-'+hashlib.sha256(url.encode()).hexdigest()[:16]
+        return store.enqueue('sdk_catalog', subject, {'release_url':url})
+    return store.enqueue('sdk_catalog', 'sdk', {})
+
+
+def overview(store, *, custom_url=None):
     cache = store.setting(CACHE_KEY, {})
-    catalogue_job = None
-    if refresh or time.time()-cache.get('attempted', 0) >= (60 if cache.get('error') else 300):
-        catalogue_job = store.enqueue('sdk_catalog', 'sdk', {})
-    else:
-        catalogue_job = next((job for job in store.jobs('sdk') if job['kind'] == 'sdk_catalog' and job['status'] in ('queued','running')), None)
+    catalogue_job = next((job for job in store.jobs('sdk') if job['kind'] == 'sdk_catalog' and job['status'] in ('queued','running')), None)
     records = {item['release_url']: dict(item) for item in cache.get('releases', [])}
     packages = sdk_packages.packages(store)
     environments = toolsets.overview(store)['toolsets']
@@ -220,14 +229,11 @@ def overview(store, *, refresh=False, custom_url=None):
     if custom_url and custom_url not in records:
         _, version = sdk_packages.release_base(custom_url)
         custom = store.setting('sdk-custom-releases', {}).get(custom_url, {})
-        pending = None
         subject = 'sdk-custom-'+hashlib.sha256(custom_url.encode()).hexdigest()[:16]
-        if refresh or time.time()-custom.get('attempted', 0) >= (60 if custom.get('failed') else 300):
-            pending = store.enqueue('sdk_catalog', subject, {'release_url':custom_url})
-        else:
-            pending = next((job for job in store.jobs(subject) if job['status'] in ('queued','running')), None)
+        pending = next((job for job in store.jobs(subject) if job['status'] in ('queued','running')), None)
         records[custom_url] = dict(custom.get('record') or {'release_url':custom_url, 'tag':'v'+version,
-                                  'version':version, 'custom':True, 'supported':False, 'reason':'Loading the custom SDK release…'})
+                                  'version':version, 'custom':True, 'supported':False,
+                                  'reason':'Loading the custom SDK release…' if pending else 'Refresh this SDK release to verify it.'})
         if pending:
             catalogue_job = pending
     for url, record in records.items():
