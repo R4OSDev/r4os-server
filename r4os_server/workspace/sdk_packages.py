@@ -177,6 +177,15 @@ def roots_file(context, key):
              'recovery-sdk': str(folder/'RECOVERY/Platform/SDK'),
              'recovery-contract': str(folder/'RECOVERY/Platform/Contract'),
              'recovery-libraries': str(folder/'RECOVERY/Legal/Sources/Libraries.zip')}
+    sources = get(context.store, key, ready=False)['manifest']['sources']
+    for name in ('recovery-sdk', 'recovery-contract', 'recovery-libraries'):
+        binding = sources.get(name, {})
+        if 'source_subdir' in binding:
+            relative = binding['source_subdir']
+            if (not isinstance(relative, str) or not relative or '\\' in relative
+                    or any(part in ('', '.', '..') for part in relative.split('/'))):
+                raise ValueError('Invalid SDK recovery source path: '+name)
+            value[name] = str(under(folder/'RECOVERY', relative))
     path = context.store.state/'sdk-roots'/(identifier(key)+'.json');write_json(path, value)
     return path
 

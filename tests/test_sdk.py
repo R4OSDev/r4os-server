@@ -197,6 +197,14 @@ class SDKTests(unittest.TestCase):
             value=copy.deepcopy(manifest);value['schema']=schema
             with self.assertRaisesRegex(ValueError,'schema'):sdk_packages.validate_manifest(value,'0.64.145')
         with self.assertRaises(ValueError):sdk_packages.release_base('https://github.com/foreign/r4os-sdk/releases/tag/v0.64.145')
+        manifest['sources']['recovery-libraries']={'source_subdir':'Platform/Libraries'}
+        with self.store.connect() as db:db.execute('UPDATE sdk_packages SET metadata=?',(json.dumps(package),))
+        roots=json.loads(sdk_packages.roots_file(self.context,'sdk-fixture').read_text())
+        self.assertEqual(Path(roots['recovery-libraries']),sdk_packages.root(self.store,'sdk-fixture')/'Content/RECOVERY/Platform/Libraries')
+        for relative in ('../outside','/etc','Platform/../Libraries','Platform\\Libraries'):
+            manifest['sources']['recovery-libraries']['source_subdir']=relative
+            with self.store.connect() as db:db.execute('UPDATE sdk_packages SET metadata=?',(json.dumps(package),))
+            with self.assertRaises(ValueError):sdk_packages.roots_file(self.context,'sdk-fixture')
 
     def test_archive_traversal_alias_and_links_are_rejected(self):
         for prefix in ('SDK','SystemLibraries'):
