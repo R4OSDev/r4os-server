@@ -45,10 +45,7 @@ def inputs(store,value):
     _,tools,package,options=selection(store,repo['name'])
     declared=module.get('sdk_profile')
     if not declared or declared.get('sdk_id')!=package['id']:
-        role='native' if module['id'].startswith('native-') else 'module' if module.get('manifest') else 'kernel' if module['id']=='kernel' else 'recovery' if module['id']=='recovery' else 'host'
-        choices=[name for name,profile in package['manifest']['profiles'].items() if profile['role']==role and profile['language']==module['language']]
-        if len(choices)!=1:raise ValueError('Refresh the repository to obtain its SDK-owned profile selection.')
-        declared=sdk_packages.provenance(package,choices[0])
+        raise ValueError('Refresh the repository to obtain its SDK-owned profile selection.')
     if declared.get('profile') not in package['manifest']['profiles']:raise ValueError('Unknown SDK profile.')
     module['sdk_profile']=declared;module['source_ids']={};sources={}
     bound={'r4os-sdk':package['manifest']['sdk_source'],**{'r4os-'+key:package['manifest']['sources'][key] for key in ('contract','libraries')}}

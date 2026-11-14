@@ -91,6 +91,8 @@ class GitHubBuildTests(unittest.TestCase):
             db.execute('INSERT INTO repositories(name,github_id,metadata,local,directory) VALUES(?,?,?,?,?)',('unusual-project',5,json.dumps(meta),json.dumps(self.local),'Main/unusual-project'))
         from sdk_fixture import install
         self.proof=install(self.store)
+        self.module['sdk_profile']=self.proof
+        self.store.local('unusual-project',self.local)
         self.fake=FakeGitHub(self.commit);self.build_count=0
         self.fake.source=self.source
         self.addCleanup(patch.stopall)
@@ -374,6 +376,10 @@ class GitHubBuildTests(unittest.TestCase):
         info=github_build.view(self.store,self.store.repository('unusual-project'))
         self.assertFalse(info['enabled']);self.assertEqual(info['state'],'checking')
         with self.assertRaisesRegex(Conflict,'Technical'):self.enqueue()
+        self.module['sdk_profile']=dict(self.proof,sdk_id='a-different-sdk')
+        self.store.local('unusual-project',self.local)
+        with self.assertRaisesRegex(ValueError,'Refresh the repository'):
+            builds.inputs(self.store,{'name':'unusual-project','target':'GAME'})
 
     def test_asset_transport_drops_auth_on_signed_redirect_and_uploads_binary(self):
         raw=b'artifact';requests=[]

@@ -199,14 +199,22 @@ class SDKTests(unittest.TestCase):
         with self.assertRaises(ValueError):sdk_packages.release_base('https://github.com/foreign/r4os-sdk/releases/tag/v0.64.145')
 
     def test_archive_traversal_alias_and_links_are_rejected(self):
-        for names,link in ((['SDK/../escape'],False),(['SDK/a','SDK/A'],False),(['SDK/link'],True)):
-            archive=Path(self.temp.name)/'unsafe.tar'
-            with tarfile.open(archive,'w') as target:
-                for name in names:
-                    member=tarfile.TarInfo(name)
-                    if link:member.type=tarfile.SYMTYPE;member.linkname='/etc/passwd'
-                    target.addfile(member,io.BytesIO())
-            with self.assertRaises(ValueError):sdk_packages.extract(archive,Path(self.temp.name)/'content','SDK')
+        for prefix in ('SDK','SystemLibraries'):
+            for names,link in (([prefix+'/../escape'],False),([prefix+'/a',prefix+'/A'],False),([prefix+'/link'],True)):
+                archive=Path(self.temp.name)/'unsafe.tar'
+                with tarfile.open(archive,'w') as target:
+                    for name in names:
+                        member=tarfile.TarInfo(name)
+                        if link:member.type=tarfile.SYMTYPE;member.linkname='/etc/passwd'
+                        target.addfile(member,io.BytesIO())
+                with self.assertRaises(ValueError):sdk_packages.extract(archive,Path(self.temp.name)/'content',prefix)
+        archive=Path(self.temp.name)/'libraries.tar';raw=b'original library asset'
+        with tarfile.open(archive,'w') as target:
+            member=tarfile.TarInfo('SystemLibraries/R4IMG.R4L');member.size=len(raw)
+            target.addfile(member,io.BytesIO(raw))
+        destination=Path(self.temp.name)/'valid'
+        sdk_packages.extract(archive,destination,'SystemLibraries')
+        self.assertEqual((destination/'SystemLibraries/R4IMG.R4L').read_bytes(),raw)
 
     def test_partial_and_legacy_environments_are_not_activatable(self):
         with self.store.connect() as db:db.execute("UPDATE sdk_packages SET status='importing'")
@@ -255,6 +263,26 @@ class SDKTests(unittest.TestCase):
         with patch.object(toolsets,'prepare_metadata_parser',return_value=Path('/not-executed')),patch.object(self.context,'run',return_value=(json.dumps(plan),0)):
             result=profiles.validate(self.context,Path(self.temp.name),discovered)
         self.assertTrue(result['modules'][0]['supported']);self.assertEqual(result['modules'][0]['sdk_profile']['profile'],'r4os-zig-module-v1')
+
+    def test_generation2_plan_profiles_are_explicit_and_kind_checked(self):
+        from r4os_server.workspace import profiles
+        package=sdk_packages.get(self.store,'sdk-fixture')
+        for kind,suffix in (('R4X',''),('R4L','r4l-'),('R4D','r4d-'),('R4P','r4p-')):
+            package['manifest']['profiles']['r4os-zig-'+suffix+'generation2']={
+                'role':'module','language':'Zig','kind':kind}
+        module={'kind':'R4X','language':'Zig'}
+        for plan in ({'sdk_profile':'r4os-zig-generation2'},
+                     {'build_profile':'r4os-zig-generation2'},
+                     {'sdk_profile':'r4os-zig-generation2','build_profile':'r4os-zig-generation2','rust_project':None}):
+            self.assertEqual(profiles.plan_profile(package,module,plan),'r4os-zig-generation2')
+        for plan,reason in (({},'one profile'),({'sdk_profile':'missing'},'not declared'),
+                            ({'sdk_profile':'r4os-zig-r4l-generation2'},'kind and language'),
+                            ({'sdk_profile':'r4os-zig-generation2','build_profile':'r4os-zig-module-v1'},'conflicting'),
+                            ({'sdk_profile':[]},'invalid')):
+            with self.subTest(plan=plan),self.assertRaisesRegex(ValueError,reason):
+                profiles.plan_profile(package,module,plan)
+        self.assertEqual(profiles.plan_profile(package,dict(module,kind='R4L'),
+                         {'sdk_profile':'r4os-zig-r4l-generation2'}),'r4os-zig-r4l-generation2')
 
     def test_verified_repeat_reuses_immutable_package_offline(self):
         with patch.object(sdk_packages,'verify',return_value={'verified':True}) as verify,patch.object(sdk_packages,'fetch',side_effect=AssertionError('network used')):

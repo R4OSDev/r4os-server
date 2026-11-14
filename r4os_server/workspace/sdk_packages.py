@@ -157,7 +157,7 @@ def validate_manifest(manifest, version):
 
 
 def extract(archive, destination, prefix):
-    if prefix not in ('SDK', 'CONTRACT', 'LIBRARIES', 'RECOVERY', 'Tools'): raise ValueError('Unknown SDK archive prefix.')
+    if prefix not in ('SDK', 'CONTRACT', 'LIBRARIES', 'RECOVERY', 'Tools', 'SystemLibraries'): raise ValueError('Unknown SDK archive prefix.')
     seen = set();total = 0
     with tarfile.open(archive) as package:
         for member in package:
@@ -257,7 +257,12 @@ def import_release(context, value):
             if item['url'] != base+name: raise ValueError('SDK assets must come from the selected official release.')
             entries[name] = item;roles.add(role)
         required = {'sdk-source','contract-source','libraries-source','recovery-sources','tools','capabilities','qualification','readme'}
-        if roles != required or set(sums) != set(entries)|{'SDK-Release.json'}: raise ValueError('The complete SDK asset set is required.')
+        if (not required <= roles or roles-required-{'system-libraries'}
+                or set(sums) != set(entries)|{'SDK-Release.json'}):
+            raise ValueError('The complete SDK asset set is required.')
+        for entry in entries.values():
+            if entry['role'] == 'system-libraries' and entry.get('prefix') != 'SystemLibraries':
+                raise ValueError('The system library package must use its SystemLibraries archive prefix.')
         entries['SDK-Release.json'] = {'path':'SDK-Release.json','role':'release','bytes':(stage/'SDK-Release.json').stat().st_size,'sha256':sha,'url':base+'SDK-Release.json'}
         entries['SHA256SUMS.txt'] = {'path':'SHA256SUMS.txt','role':'checksums','bytes':(stage/'SHA256SUMS.txt').stat().st_size,'sha256':digest(stage/'SHA256SUMS.txt'),'url':base+'SHA256SUMS.txt'}
         metadata = {'manifest': manifest, 'manifest_sha256': sha, 'release_url': value['release_url'], 'assets': list(entries.values())}

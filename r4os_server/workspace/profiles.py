@@ -61,6 +61,32 @@ def package_version(root):
     return ""
 
 
+def plan_profile(package, module, plan):
+    """Use the profile selected by the SDK, including explicit generation pins."""
+    rust = plan.get('rust_project') or {}
+    if not isinstance(rust, dict):
+        raise ValueError('The SDK returned an invalid Rust project plan.')
+    declared = [value for value in (plan.get('sdk_profile'), plan.get('build_profile'), rust.get('profile')) if value is not None]
+    if declared:
+        if any(not isinstance(value, str) or not value for value in declared) or len(set(declared)) != 1:
+            raise ValueError('The SDK plan declares invalid or conflicting build profiles.')
+        profile = declared[0]
+    else:
+        choices = [key for key, value in package['manifest']['profiles'].items()
+                   if value['role'] == 'module' and value['language'] == module['language']
+                   and value.get('kind', module['kind']) == module['kind']]
+        if len(choices) != 1:
+            raise ValueError('The SDK does not resolve this module to one profile.')
+        profile = choices[0]
+    definition = package['manifest']['profiles'].get(profile)
+    if definition is None:
+        raise ValueError('The catalog profile is not declared by this SDK.')
+    if (definition['role'] != 'module' or definition['language'] != module['language']
+            or definition.get('kind', module['kind']) != module['kind']):
+        raise ValueError('The SDK profile does not match the module kind and language.')
+    return profile
+
+
 def validate(context, root, discovered):
     from . import toolsets, sdk_packages
     try:
@@ -82,13 +108,7 @@ def validate(context, root, discovered):
                 plan = json.loads(text)['plan']
                 for key in ('kind','name','language'):
                     if module[key] != plan[key]: raise ValueError('Manifest differs from the SDK plan: '+key)
-                profile = (plan.get('rust_project') or {}).get('profile')
-                if not profile:
-                    choices = [key for key,value in package['manifest']['profiles'].items()
-                               if value['role'] == 'module' and value['language'] == module['language']]
-                    if len(choices) != 1: raise ValueError('The SDK does not resolve this module to one profile.')
-                    profile = choices[0]
-                if profile not in package['manifest']['profiles']: raise ValueError('The catalog profile is not declared by this SDK.')
+                profile = plan_profile(package, module, plan)
                 module.update(scope=plan.get('image_scope','none'), optimization=plan.get('optimization'),
                               sdk_profile=sdk_packages.provenance(package,profile), supported=True, validated=True,
                               validation_toolset=tools['id'], reason='')
