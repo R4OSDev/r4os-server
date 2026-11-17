@@ -109,7 +109,9 @@ class WebAppHandler(Handler):
 
         filename, content_type = asset
         try:
-            content = (STATIC_ROOT / filename).read_bytes()
+            with (STATIC_ROOT / filename).open("rb") as source:
+                content = source.read() if send_body else b""
+                length = len(content) if send_body else os.fstat(source.fileno()).st_size
         except OSError:
             logging.exception("WebApp file could not be read: %s", filename)
             self.send_content(
@@ -120,12 +122,12 @@ class WebAppHandler(Handler):
             )
             return
         cache_control = "private, max-age=86400" if path in ICON_PATHS else "no-store"
-        self.send_content(200, content_type, content, send_body, cache_control=cache_control)
+        self.send_content(200, content_type, content, send_body, cache_control=cache_control, length=length)
 
-    def send_content(self, status, content_type, content, send_body, *, cache_control="no-store"):
+    def send_content(self, status, content_type, content, send_body, *, cache_control="no-store", length=None):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(content)))
+        self.send_header("Content-Length", str(len(content) if length is None else length))
         self.send_header("Cache-Control", cache_control)
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
